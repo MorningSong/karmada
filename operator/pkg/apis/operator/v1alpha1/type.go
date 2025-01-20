@@ -24,9 +24,9 @@ import (
 // +genclient
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:subresource:status
-// +kubebuilder:path=karmadas,scope=Namespaced,categories={karmada-io}
-// +kubebuilder:printcolumn:JSONPath=`.status.controlPlaneReady`,name="Status",type=string
-// +kubebuilder:printcolumn:JSONPath=`.metadata.creationTimestamp`,name="Age",type=date
+// +kubebuilder:resource:path=karmadas,scope=Namespaced,categories={karmada-io}
+// +kubebuilder:printcolumn:JSONPath=`.status.conditions[?(@.type=="Ready")].status`,name="READY",type=string
+// +kubebuilder:printcolumn:JSONPath=`.metadata.creationTimestamp`,name="AGE",type=date
 
 // Karmada enables declarative installation of karmada.
 type Karmada struct {
@@ -42,6 +42,38 @@ type Karmada struct {
 	// Most recently observed status of the Karmada.
 	// +optional
 	Status KarmadaStatus `json:"status,omitempty"`
+}
+
+// CRDDownloadPolicy specifies a policy for how the operator will download the Karmada CRD tarball
+type CRDDownloadPolicy string
+
+const (
+	// DownloadAlways instructs the Karmada operator to always download the CRD tarball from a remote location.
+	DownloadAlways CRDDownloadPolicy = "Always"
+
+	// DownloadIfNotPresent instructs the Karmada operator to download the CRDs tarball from a remote location only if it is not yet present in the local cache.
+	DownloadIfNotPresent CRDDownloadPolicy = "IfNotPresent"
+)
+
+// HTTPSource specifies how to download the CRD tarball via either HTTP or HTTPS protocol.
+type HTTPSource struct {
+	// URL specifies the URL of the CRD tarball resource.
+	URL string `json:"url,omitempty"`
+}
+
+// CRDTarball specifies the source from which the Karmada CRD tarball should be downloaded, along with the download policy to use.
+type CRDTarball struct {
+	// HTTPSource specifies how to download the CRD tarball via either HTTP or HTTPS protocol.
+	// +optional
+	HTTPSource *HTTPSource `json:"httpSource,omitempty"`
+
+	// CRDDownloadPolicy specifies a policy that should be used to download the CRD tarball.
+	// Valid values are "Always" and "IfNotPresent".
+	// Defaults to "IfNotPresent".
+	// +kubebuilder:validation:Enum=Always;IfNotPresent
+	// +kubebuilder:default=IfNotPresent
+	// +optional
+	CRDDownloadPolicy *CRDDownloadPolicy `json:"crdDownloadPolicy,omitempty"`
 }
 
 // KarmadaSpec is the specification of the desired behavior of the Karmada.
@@ -66,12 +98,41 @@ type KarmadaSpec struct {
 
 	// FeatureGates enabled by the user.
 	// - Failover: https://karmada.io/docs/userguide/failover/#failover
-	// - GragscefulEviction: https://karmada.io/docs/userguide/failover/#graceful-eviction-feature
+	// - GracefulEviction: https://karmada.io/docs/userguide/failover/#graceful-eviction-feature
 	// - PropagateDeps: https://karmada.io/docs/userguide/scheduling/propagate-dependencies
 	// - CustomizedClusterResourceModeling: https://karmada.io/docs/userguide/scheduling/cluster-resources#start-to-use-cluster-resource-models
 	// More info: https://github.com/karmada-io/karmada/blob/master/pkg/features/features.go
 	// +optional
 	FeatureGates map[string]bool `json:"featureGates,omitempty"`
+
+	// CRDTarball specifies the source from which the Karmada CRD tarball should be downloaded, along with the download policy to use.
+	// If not set, the operator will download the tarball from a GitHub release.
+	// By default, it will download the tarball of the same version as the operator itself.
+	// For instance, if the operator's version is v1.10.0, the tarball will be downloaded from the following location:
+	// https://github.com/karmada-io/karmada/releases/download/v1.10.0/crds.tar.gz
+	// By default, the operator will only attempt to download the tarball if it's not yet present in the local cache.
+	// +optional
+	CRDTarball *CRDTarball `json:"crdTarball,omitempty"`
+
+	// CustomCertificate specifies the configuration to customize the certificates
+	// for Karmada components or control the certificate generation process, such as
+	// the algorithm, validity period, etc.
+	// Currently, it only supports customizing the CA certificate for limited components.
+	// +optional
+	CustomCertificate *CustomCertificate `json:"customCertificate,omitempty"`
+}
+
+// CustomCertificate holds the configuration for generating the certificate.
+type CustomCertificate struct {
+	// APIServerCACert references a Kubernetes secret containing the CA certificate
+	// for component karmada-apiserver.
+	// The secret must contain the following data keys:
+	// - tls.crt: The TLS certificate.
+	// - tls.key: The TLS private key.
+	// If specified, this CA will be used to issue client certificates for
+	// all components that access the APIServer as clients.
+	// +optional
+	APIServerCACert *LocalSecretReference `json:"apiServerCACert,omitempty"`
 }
 
 // ImageRegistry represents an image registry as well as the
@@ -96,9 +157,9 @@ type KarmadaComponents struct {
 	// +optional
 	KarmadaAPIServer *KarmadaAPIServer `json:"karmadaAPIServer,omitempty"`
 
-	// KarmadaAggregratedAPIServer holds settings to karmada-aggregated-apiserver component of the karmada.
+	// KarmadaAggregatedAPIServer holds settings to karmada-aggregated-apiserver component of the karmada.
 	// +optional
-	KarmadaAggregratedAPIServer *KarmadaAggregratedAPIServer `json:"karmadaAggregratedAPIServer,omitempty"`
+	KarmadaAggregatedAPIServer *KarmadaAggregatedAPIServer `json:"karmadaAggregatedAPIServer,omitempty"`
 
 	// KubeControllerManager holds settings to kube-controller-manager component of the karmada.
 	// +optional
@@ -112,17 +173,21 @@ type KarmadaComponents struct {
 	// +optional
 	KarmadaScheduler *KarmadaScheduler `json:"karmadaScheduler,omitempty"`
 
-	// KarmadaWebhook holds settings to karmada-webook component of the karmada.
+	// KarmadaWebhook holds settings to karmada-webhook component of the karmada.
 	// +optional
 	KarmadaWebhook *KarmadaWebhook `json:"karmadaWebhook,omitempty"`
 
 	// KarmadaDescheduler holds settings to karmada-descheduler component of the karmada.
 	// +optional
-	KarmadaDescheduler *KarmadaDescheduler `json:"KarmadaDescheduler,omitempty"`
+	KarmadaDescheduler *KarmadaDescheduler `json:"karmadaDescheduler,omitempty"`
 
 	// KarmadaSearch holds settings to karmada search component of the karmada.
 	// +optional
 	KarmadaSearch *KarmadaSearch `json:"karmadaSearch,omitempty"`
+
+	// KarmadaMetricsAdapter holds settings to karmada metrics adapter component of the karmada.
+	// +optional
+	KarmadaMetricsAdapter *KarmadaMetricsAdapter `json:"karmadaMetricsAdapter,omitempty"`
 }
 
 // Networking contains elements describing cluster's networking configuration
@@ -147,11 +212,11 @@ type Etcd struct {
 
 // LocalEtcd describes that operator should run an etcd cluster in a host cluster.
 type LocalEtcd struct {
-	// ImageMeta allows to customize the container used for etcd
-	Image `json:",inline"`
+	// CommonSettings holds common settings to etcd.
+	CommonSettings `json:",inline"`
 
 	// VolumeData describes the settings of etcd data store.
-	// We will support 3 modes: emtydir, hostPath, PVC. default by hostPath.
+	// We will support 3 modes: emptyDir, hostPath, PVC. default by hostPath.
 	// +optional
 	VolumeData *VolumeData `json:"volumeData,omitempty"`
 
@@ -191,26 +256,39 @@ type VolumeData struct {
 }
 
 // ExternalEtcd describes an external etcd cluster.
-// operator has no knowledge of where certificate files live and they must be supplied.
+// operator has no knowledge of where certificate files live, and they must be supplied.
 type ExternalEtcd struct {
 	// Endpoints of etcd members. Required for ExternalEtcd.
+	// +required
 	Endpoints []string `json:"endpoints"`
 
 	// CAData is an SSL Certificate Authority file used to secure etcd communication.
 	// Required if using a TLS connection.
-	CAData []byte `json:"caData"`
+	// Deprecated: This field is deprecated and will be removed in a future version. Use SecretRef for providing client connection credentials.
+	CAData []byte `json:"caData,omitempty"`
 
 	// CertData is an SSL certification file used to secure etcd communication.
 	// Required if using a TLS connection.
-	CertData []byte `json:"certData"`
+	// Deprecated: This field is deprecated and will be removed in a future version. Use SecretRef for providing client connection credentials.
+	CertData []byte `json:"certData,omitempty"`
 
 	// KeyData is an SSL key file used to secure etcd communication.
 	// Required if using a TLS connection.
-	KeyData []byte `json:"keyData"`
+	// Deprecated: This field is deprecated and will be removed in a future version. Use SecretRef for providing client connection credentials.
+	KeyData []byte `json:"keyData,omitempty"`
+
+	// SecretRef references a Kubernetes secret containing the etcd connection credentials.
+	// The secret must contain the following data keys:
+	// ca.crt: The Certificate Authority (CA) certificate data.
+	// tls.crt: The TLS certificate data used for verifying the etcd server's certificate.
+	// tls.key: The TLS private key.
+	// Required to configure the connection to an external etcd cluster.
+	// +required
+	SecretRef LocalSecretReference `json:"secretRef"`
 }
 
 // KarmadaAPIServer holds settings to kube-apiserver component of the kubernetes.
-// Karmada uses it as it's own apiserver in order to provide Kubernetes-native APIs.
+// Karmada uses it as its own apiserver in order to provide Kubernetes-native APIs.
 type KarmadaAPIServer struct {
 	// CommonSettings holds common settings to kubernetes api server.
 	CommonSettings `json:",inline"`
@@ -219,6 +297,20 @@ type KarmadaAPIServer struct {
 	// +optional
 	ServiceSubnet *string `json:"serviceSubnet,omitempty"`
 
+	// ServiceType represents the service type of Karmada API server.
+	// Valid options are: "ClusterIP", "NodePort", "LoadBalancer".
+	// Defaults to "ClusterIP".
+	//
+	// +kubebuilder:default="ClusterIP"
+	// +kubebuilder:validation:Enum=ClusterIP;NodePort;LoadBalancer
+	// +optional
+	ServiceType corev1.ServiceType `json:"serviceType,omitempty"`
+
+	// ServiceAnnotations is an extra set of annotations for service of karmada apiserver.
+	// more info: https://github.com/karmada-io/karmada/issues/4634
+	// +optional
+	ServiceAnnotations map[string]string `json:"serviceAnnotations,omitempty"`
+
 	// ExtraArgs is an extra set of flags to pass to the kube-apiserver component or
 	// override. A key in this map is the flag name as it appears on the command line except
 	// without leading dash(es).
@@ -226,7 +318,7 @@ type KarmadaAPIServer struct {
 	// Note: This is a temporary solution to allow for the configuration of the
 	// kube-apiserver component. In the future, we will provide a more structured way
 	// to configure the component. Once that is done, this field will be discouraged to be used.
-	// Incorrect settings on this feild maybe lead to the corresponding component in an unhealthy
+	// Incorrect settings on this field maybe lead to the corresponding component in an unhealthy
 	// state. Before you do it, please confirm that you understand the risks of this configuration.
 	//
 	// For supported flags, please see
@@ -234,6 +326,24 @@ type KarmadaAPIServer struct {
 	// for details.
 	// +optional
 	ExtraArgs map[string]string `json:"extraArgs,omitempty"`
+
+	// ExtraVolumes specifies a list of extra volumes for the API server's pod
+	// To fulfil the base functionality required for a functioning control plane, when provisioning a new Karmada instance,
+	// the operator will automatically attach volumes for the API server pod needed to configure things such as TLS,
+	// SA token issuance/signing and secured connection to etcd, amongst others. However, given the wealth of options for configurability,
+	// there are additional features (e.g., encryption at rest and custom AuthN webhook) that can be configured. ExtraVolumes, in conjunction
+	// with ExtraArgs and ExtraVolumeMounts can be used to fulfil those use cases.
+	// +optional
+	ExtraVolumes []corev1.Volume `json:"extraVolumes,omitempty"`
+
+	// ExtraVolumeMounts specifies a list of extra volume mounts to be mounted into the API server's container
+	// To fulfil the base functionality required for a functioning control plane, when provisioning a new Karmada instance,
+	// the operator will automatically mount volumes into the API server container needed to configure things such as TLS,
+	// SA token issuance/signing and secured connection to etcd, amongst others. However, given the wealth of options for configurability,
+	// there are additional features (e.g., encryption at rest and custom AuthN webhook) that can be configured. ExtraVolumeMounts, in conjunction
+	// with ExtraArgs and ExtraVolumes can be used to fulfil those use cases.
+	// +optional
+	ExtraVolumeMounts []corev1.VolumeMount `json:"extraVolumeMounts,omitempty"`
 
 	// CertSANs sets extra Subject Alternative Names for the API Server signing cert.
 	// +optional
@@ -245,8 +355,8 @@ type KarmadaAPIServer struct {
 	FeatureGates map[string]bool `json:"featureGates,omitempty"`
 }
 
-// KarmadaAggregratedAPIServer holds settings to karmada-aggregated-apiserver component of the karmada.
-type KarmadaAggregratedAPIServer struct {
+// KarmadaAggregatedAPIServer holds settings to karmada-aggregated-apiserver component of the karmada.
+type KarmadaAggregatedAPIServer struct {
 	// CommonSettings holds common settings to karmada apiServer.
 	CommonSettings `json:",inline"`
 
@@ -257,11 +367,11 @@ type KarmadaAggregratedAPIServer struct {
 	// Note: This is a temporary solution to allow for the configuration of the
 	// karmada-aggregated-apiserver component. In the future, we will provide a more structured way
 	// to configure the component. Once that is done, this field will be discouraged to be used.
-	// Incorrect settings on this feild maybe lead to the corresponding component in an unhealthy
+	// Incorrect settings on this field maybe lead to the corresponding component in an unhealthy
 	// state. Before you do it, please confirm that you understand the risks of this configuration.
 	//
 	// For supported flags, please see
-	// https://github.com/karmada-io/karmada/blob/master/cmd/aggregated-apiserver/app/options/options.go
+	// https://karmada.io/docs/reference/components/karmada-aggregated-apiserver
 	// for details.
 	// +optional
 	ExtraArgs map[string]string `json:"extraArgs,omitempty"`
@@ -269,11 +379,6 @@ type KarmadaAggregratedAPIServer struct {
 	// CertSANs sets extra Subject Alternative Names for the API Server signing cert.
 	// +optional
 	CertSANs []string `json:"certSANs,omitempty"`
-
-	// ServiceType represents the service type of karmada apiserver.
-	// it is Nodeport by default.
-	// +optional
-	ServiceType corev1.ServiceType `json:"serviceType,omitempty"`
 
 	// FeatureGates enabled by the user.
 	// - CustomizedClusterResourceModeling: https://karmada.io/docs/userguide/scheduling/cluster-resources#start-to-use-cluster-resource-models
@@ -321,7 +426,7 @@ type KubeControllerManager struct {
 	// https://karmada.io/docs/administrator/configuration/configure-controllers#kubernetes-controllers
 	//
 	// Others are disabled by default. If you want to enable or disable other controllers, you
-	// have to explicitly specify all the controllers that kube-controller-manager shoud enable
+	// have to explicitly specify all the controllers that kube-controller-manager should enable
 	// at startup phase.
 	// +optional
 	Controllers []string `json:"controllers,omitempty"`
@@ -333,7 +438,7 @@ type KubeControllerManager struct {
 	// Note: This is a temporary solution to allow for the configuration of the
 	// kube-controller-manager component. In the future, we will provide a more structured way
 	// to configure the component. Once that is done, this field will be discouraged to be used.
-	// Incorrect settings on this feild maybe lead to the corresponding component in an unhealthy
+	// Incorrect settings on this field maybe lead to the corresponding component in an unhealthy
 	// state. Before you do it, please confirm that you understand the risks of this configuration.
 	//
 	// For supported flags, please see
@@ -375,11 +480,11 @@ type KarmadaControllerManager struct {
 	// Note: This is a temporary solution to allow for the configuration of the
 	// karmada-controller-manager component. In the future, we will provide a more structured way
 	// to configure the component. Once that is done, this field will be discouraged to be used.
-	// Incorrect settings on this feild maybe lead to the corresponding component in an unhealthy
+	// Incorrect settings on this field maybe lead to the corresponding component in an unhealthy
 	// state. Before you do it, please confirm that you understand the risks of this configuration.
 	//
 	// For supported flags, please see
-	// https://github.com/karmada-io/karmada/blob/master/cmd/controller-manager/app/options/options.go
+	// https://karmada.io/docs/reference/components/karmada-controller-manager
 	// for details.
 	// +optional
 	ExtraArgs map[string]string `json:"extraArgs,omitempty"`
@@ -406,11 +511,11 @@ type KarmadaScheduler struct {
 	// Note: This is a temporary solution to allow for the configuration of the karmada-scheduler
 	// component. In the future, we will provide a more structured way to configure the component.
 	// Once that is done, this field will be discouraged to be used.
-	// Incorrect settings on this feild maybe lead to the corresponding component in an unhealthy
+	// Incorrect settings on this field maybe lead to the corresponding component in an unhealthy
 	// state. Before you do it, please confirm that you understand the risks of this configuration.
 	//
 	// For supported flags, please see
-	// https://github.com/karmada-io/karmada/blob/master/cmd/scheduler/app/options/options.go
+	// https://karmada.io/docs/reference/components/karmada-scheduler
 	// for details.
 	// +optional
 	ExtraArgs map[string]string `json:"extraArgs,omitempty"`
@@ -434,11 +539,11 @@ type KarmadaDescheduler struct {
 	// Note: This is a temporary solution to allow for the configuration of the karmada-descheduler
 	// component. In the future, we will provide a more structured way to configure the component.
 	// Once that is done, this field will be discouraged to be used.
-	// Incorrect settings on this feild maybe lead to the corresponding component in an unhealthy
+	// Incorrect settings on this field maybe lead to the corresponding component in an unhealthy
 	// state. Before you do it, please confirm that you understand the risks of this configuration.
 	//
 	// For supported flags, please see
-	// https://github.com/karmada-io/karmada/blob/master/cmd/descheduler/app/options/options.go
+	// https://karmada.io/docs/reference/components/karmada-descheduler
 	// for details.
 	// +optional
 	ExtraArgs map[string]string `json:"extraArgs,omitempty"`
@@ -449,18 +554,40 @@ type KarmadaSearch struct {
 	// CommonSettings holds common settings to karmada search.
 	CommonSettings `json:",inline"`
 
-	// ExtraArgs is an extra set of flags to pass to the karmada-descheduler component or override.
+	// ExtraArgs is an extra set of flags to pass to the karmada-search component or override.
 	// A key in this map is the flag name as it appears on the command line except without
 	// leading dash(es).
 	//
-	// Note: This is a temporary solution to allow for the configuration of the karmada-descheduler
+	// Note: This is a temporary solution to allow for the configuration of the karmada-search
 	// component. In the future, we will provide a more structured way to configure the component.
 	// Once that is done, this field will be discouraged to be used.
-	// Incorrect settings on this feild maybe lead to the corresponding component in an unhealthy
+	// Incorrect settings on this field maybe lead to the corresponding component in an unhealthy
 	// state. Before you do it, please confirm that you understand the risks of this configuration.
 	//
 	// For supported flags, please see
-	// https://github.com/karmada-io/karmada/blob/master/cmd/descheduler/app/options/options.go
+	// https://karmada.io/docs/reference/components/karmada-search
+	// for details.
+	// +optional
+	ExtraArgs map[string]string `json:"extraArgs,omitempty"`
+}
+
+// KarmadaMetricsAdapter holds settings to karmada-metrics-adapter component of the karmada.
+type KarmadaMetricsAdapter struct {
+	// CommonSettings holds common settings to karmada metrics adapter.
+	CommonSettings `json:",inline"`
+
+	// ExtraArgs is an extra set of flags to pass to the karmada-metrics-adapter component or override.
+	// A key in this map is the flag name as it appears on the command line except without
+	// leading dash(es).
+	//
+	// Note: This is a temporary solution to allow for the configuration of the karmada-metrics-adapter
+	// component. In the future, we will provide a more structured way to configure the component.
+	// Once that is done, this field will be discouraged to be used.
+	// Incorrect settings on this field maybe lead to the corresponding component in an unhealthy
+	// state. Before you do it, please confirm that you understand the risks of this configuration.
+	//
+	// For supported flags, please see
+	// https://karmada.io/docs/reference/components/karmada-metrics-adapter
 	// for details.
 	// +optional
 	ExtraArgs map[string]string `json:"extraArgs,omitempty"`
@@ -478,11 +605,11 @@ type KarmadaWebhook struct {
 	// Note: This is a temporary solution to allow for the configuration of the
 	// karmada-webhook component. In the future, we will provide a more structured way
 	// to configure the component. Once that is done, this field will be discouraged to be used.
-	// Incorrect settings on this feild maybe lead to the corresponding component in an unhealthy
+	// Incorrect settings on this field maybe lead to the corresponding component in an unhealthy
 	// state. Before you do it, please confirm that you understand the risks of this configuration.
 	//
 	// For supported flags, please see
-	// https://github.com/karmada-io/karmada/blob/master/cmd/webhook/app/options/options.go
+	// https://karmada.io/docs/reference/components/karmada-webhook
 	// for details.
 	// +optional
 	ExtraArgs map[string]string `json:"extraArgs,omitempty"`
@@ -492,6 +619,11 @@ type KarmadaWebhook struct {
 type CommonSettings struct {
 	// Image allows to customize the image used for the component.
 	Image `json:",inline"`
+
+	// ImagePullPolicy defines the policy for pulling the container image.
+	// If not specified, it defaults to IfNotPresent.
+	// +optional
+	ImagePullPolicy corev1.PullPolicy `json:"imagePullPolicy,omitempty"`
 
 	// Number of desired pods. This is a pointer to distinguish between explicit
 	// zero and not specified. Defaults to 1.
@@ -553,19 +685,15 @@ type HostCluster struct {
 	Networking *Networking `json:"networking,omitempty"`
 }
 
-// ConditionType declarative karmada condition type of karmada installtion.
+// ConditionType declarative karmada condition type of karmada installation.
 type ConditionType string
 
 const (
-	// Unknown represent a condition type the karmada not be reconciled by operator
-	// or unpredictable condition.
-	Unknown ConditionType = "Unknown"
-
-	// Ready represent a condition type the all installtion process to karmada have compaleted.
+	// Ready represent a condition type the all installation process to karmada have completed.
 	Ready ConditionType = "Ready"
 )
 
-// KarmadaStatus difine the most recently observed status of the Karmada.
+// KarmadaStatus define the most recently observed status of the Karmada.
 type KarmadaStatus struct {
 	// ObservedGeneration is the last observed generation.
 	// +optional
@@ -575,17 +703,32 @@ type KarmadaStatus struct {
 	// +optional
 	SecretRef *LocalSecretReference `json:"secretRef,omitempty"`
 
-	// KarmadaVersion represente the karmada version.
+	// KarmadaVersion represent the karmada version.
 	// +optional
 	KarmadaVersion string `json:"karmadaVersion,omitempty"`
 
-	// KubernetesVersion represente the karmada-apiserver version.
+	// KubernetesVersion represent the karmada-apiserver version.
 	// +optional
 	KubernetesVersion string `json:"kubernetesVersion,omitempty"`
 
 	// Conditions represents the latest available observations of a karmada's current state.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// APIServerService reports the location of the Karmada API server service which
+	// can be used by third-party applications to discover the Karmada Service, e.g.
+	// expose the service outside the cluster by Ingress.
+	// +optional
+	APIServerService *APIServerService `json:"apiServerService,omitempty"`
+}
+
+// APIServerService tells the location of Karmada API server service.
+// Currently, it only includes the name of the service. The namespace
+// of the service is the same as the namespace of the current Karmada object.
+type APIServerService struct {
+	// Name represents the name of the Karmada API Server service.
+	// +required
+	Name string `json:"name"`
 }
 
 // LocalSecretReference is a reference to a secret within the enclosing

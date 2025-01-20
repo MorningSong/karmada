@@ -1,3 +1,19 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package taint
 
 import (
@@ -139,14 +155,14 @@ func TestDeleteTaint(t *testing.T) {
 				},
 			},
 			taintToDelete:  &corev1.Taint{Key: "foo", Effect: corev1.TaintEffectNoSchedule},
-			expectedTaints: []corev1.Taint{},
+			expectedTaints: nil,
 			expectedResult: true,
 		},
 		{
 			name:           "delete taint from empty taint array",
 			taints:         []corev1.Taint{},
 			taintToDelete:  &corev1.Taint{Key: "foo", Effect: corev1.TaintEffectNoSchedule},
-			expectedTaints: []corev1.Taint{},
+			expectedTaints: nil,
 			expectedResult: false,
 		},
 	}
@@ -199,14 +215,14 @@ func TestDeleteTaintByKey(t *testing.T) {
 				},
 			},
 			taintKey:       "foo",
-			expectedTaints: []corev1.Taint{},
+			expectedTaints: nil,
 			expectedResult: true,
 		},
 		{
 			name:           "delete taint from empty taint array",
 			taints:         []corev1.Taint{},
 			taintKey:       "foo",
-			expectedTaints: []corev1.Taint{},
+			expectedTaints: nil,
 			expectedResult: false,
 		},
 	}
@@ -359,7 +375,7 @@ func TestReorganizeTaints(t *testing.T) {
 					Effect: corev1.TaintEffectNoSchedule,
 				},
 			},
-			expectedTaints:    []corev1.Taint{},
+			expectedTaints:    nil,
 			expectedOperation: UNTAINTED,
 			expectedErr:       false,
 		},
@@ -372,7 +388,7 @@ func TestReorganizeTaints(t *testing.T) {
 					Key: "foo",
 				},
 			},
-			expectedTaints:    []corev1.Taint{},
+			expectedTaints:    nil,
 			expectedOperation: UNTAINTED,
 			expectedErr:       false,
 		},

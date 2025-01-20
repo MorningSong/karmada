@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package helper
 
 import (
@@ -5,8 +21,8 @@ import (
 	"reflect"
 	"testing"
 
-	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	policyv1alpha1 "github.com/karmada-io/karmada/pkg/apis/policy/v1alpha1"
@@ -176,11 +192,11 @@ func TestIsDependentClusterOverridesPresent(t *testing.T) {
 	}
 }
 
-func TestGetFollowedResourceSelectorsWhenMatchServiceImport(t *testing.T) {
+func TestCheckMatchServiceImport(t *testing.T) {
 	tests := []struct {
 		name              string
 		resourceSelectors []policyv1alpha1.ResourceSelector
-		expected          []policyv1alpha1.ResourceSelector
+		expected          bool
 	}{
 		{
 			name: " get followed resource selector",
@@ -195,78 +211,19 @@ func TestGetFollowedResourceSelectorsWhenMatchServiceImport(t *testing.T) {
 					Kind:      util.ServiceKind,
 				},
 				{
-					Name:      "foo3",
-					Namespace: "bar",
-					Kind:      util.ServiceImportKind,
+					Name:       "foo3",
+					Namespace:  "bar",
+					Kind:       util.ServiceImportKind,
+					APIVersion: "multicluster.x-k8s.io/v1alpha1",
 				},
 			},
-			expected: []policyv1alpha1.ResourceSelector{
-				{
-					APIVersion: "v1",
-					Kind:       util.ServiceKind,
-					Namespace:  "bar",
-					Name:       "derived-foo3",
-				},
-				{
-					APIVersion: "discovery.k8s.io/v1",
-					Kind:       util.EndpointSliceKind,
-					Namespace:  "bar",
-					LabelSelector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{
-							discoveryv1.LabelServiceName: "derived-foo3",
-						},
-					},
-				},
-			},
+			expected: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			res := GetFollowedResourceSelectorsWhenMatchServiceImport(tt.resourceSelectors)
-			if !reflect.DeepEqual(res, tt.expected) {
-				t.Errorf("expected %v, but got %v", tt.expected, res)
-			}
-		})
-	}
-}
-
-func TestGenerateResourceSelectorForServiceImport(t *testing.T) {
-	tests := []struct {
-		name      string
-		svcImport policyv1alpha1.ResourceSelector
-		expected  []policyv1alpha1.ResourceSelector
-	}{
-		{
-			name: "generate resource selector",
-			svcImport: policyv1alpha1.ResourceSelector{
-				Name:      "foo",
-				Namespace: "bar",
-			},
-			expected: []policyv1alpha1.ResourceSelector{
-				{
-					APIVersion: "v1",
-					Kind:       util.ServiceKind,
-					Namespace:  "bar",
-					Name:       "derived-foo",
-				},
-				{
-					APIVersion: "discovery.k8s.io/v1",
-					Kind:       util.EndpointSliceKind,
-					Namespace:  "bar",
-					LabelSelector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{
-							discoveryv1.LabelServiceName: "derived-foo",
-						},
-					},
-				},
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			res := GenerateResourceSelectorForServiceImport(tt.svcImport)
+			res := ContainsServiceImport(tt.resourceSelectors)
 			if !reflect.DeepEqual(res, tt.expected) {
 				t.Errorf("expected %v, but got %v", tt.expected, res)
 			}
@@ -315,7 +272,7 @@ func TestIsReplicaDynamicDivided(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			res := IsReplicaDynamicDivided(tt.strategy)
+			res := IsReplicaDynamicDivided(&policyv1alpha1.Placement{ReplicaScheduling: tt.strategy})
 			if res != tt.expected {
 				t.Errorf("expected %v, but got %v", tt.expected, res)
 			}
@@ -357,6 +314,93 @@ func TestGetAppliedPlacement(t *testing.T) {
 			res, err := GetAppliedPlacement(tt.annotations)
 			if !reflect.DeepEqual(res, tt.expectedPlacement) || err != tt.expectedErr {
 				t.Errorf("expected %v and %v, but got %v and %v", tt.expectedPlacement, tt.expectedErr, res, err)
+			}
+		})
+	}
+}
+
+func TestSetReplicaDivisionPreferenceWeighted(t *testing.T) {
+	tests := []struct {
+		name             string
+		strategy         *policyv1alpha1.ReplicaSchedulingStrategy
+		expectedWeighted bool
+	}{
+		{
+			name:             "no replica scheduling strategy declared",
+			expectedWeighted: false,
+		},
+		{
+			name: "specified aggregated division preference",
+			strategy: &policyv1alpha1.ReplicaSchedulingStrategy{
+				ReplicaSchedulingType:     policyv1alpha1.ReplicaSchedulingTypeDivided,
+				ReplicaDivisionPreference: policyv1alpha1.ReplicaDivisionPreferenceAggregated,
+			},
+			expectedWeighted: false,
+		},
+		{
+			name: "unspecified replica division preference",
+			strategy: &policyv1alpha1.ReplicaSchedulingStrategy{
+				ReplicaSchedulingType: policyv1alpha1.ReplicaSchedulingTypeDivided,
+			},
+			expectedWeighted: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &policyv1alpha1.Placement{ReplicaScheduling: tt.strategy}
+			SetReplicaDivisionPreferenceWeighted(p)
+			if (p.ReplicaScheduling != nil &&
+				p.ReplicaScheduling.ReplicaDivisionPreference == policyv1alpha1.ReplicaDivisionPreferenceWeighted) != tt.expectedWeighted {
+				t.Errorf("expectedWeighted %v, but got %v", tt.expectedWeighted, !tt.expectedWeighted)
+			}
+		})
+	}
+}
+
+func TestSetDefaultGracePeriodSeconds(t *testing.T) {
+	tests := []struct {
+		name           string
+		behavior       *policyv1alpha1.ApplicationFailoverBehavior
+		expectBehavior *policyv1alpha1.ApplicationFailoverBehavior
+	}{
+		{
+			name: "purgeMode is not graciously",
+			behavior: &policyv1alpha1.ApplicationFailoverBehavior{
+				PurgeMode: policyv1alpha1.Never,
+			},
+			expectBehavior: &policyv1alpha1.ApplicationFailoverBehavior{
+				PurgeMode: policyv1alpha1.Never,
+			},
+		},
+		{
+			name: "purgeMode is graciously and gracePeriodSeconds is set",
+			behavior: &policyv1alpha1.ApplicationFailoverBehavior{
+				PurgeMode:          policyv1alpha1.Graciously,
+				GracePeriodSeconds: ptr.To[int32](200),
+			},
+			expectBehavior: &policyv1alpha1.ApplicationFailoverBehavior{
+				PurgeMode:          policyv1alpha1.Graciously,
+				GracePeriodSeconds: ptr.To[int32](200),
+			},
+		},
+		{
+			name: "purgeMode is graciously and gracePeriodSeconds is not set",
+			behavior: &policyv1alpha1.ApplicationFailoverBehavior{
+				PurgeMode: policyv1alpha1.Graciously,
+			},
+			expectBehavior: &policyv1alpha1.ApplicationFailoverBehavior{
+				PurgeMode:          policyv1alpha1.Graciously,
+				GracePeriodSeconds: ptr.To[int32](600),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			SetDefaultGracePeriodSeconds(tt.behavior)
+			if !reflect.DeepEqual(tt.behavior, tt.expectBehavior) {
+				t.Errorf("expectedBehavior %v, but got %v", tt.expectBehavior, tt.behavior)
 			}
 		})
 	}

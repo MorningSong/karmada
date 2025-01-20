@@ -1,3 +1,19 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package karmada
 
 import (
@@ -20,7 +36,7 @@ kind: MutatingWebhookConfiguration
 metadata:
   name: mutating-config
   labels:
-    app: mutating-config
+    app: karmada-webhook
 webhooks:
   - name: propagationpolicy.karmada.io
     rules:
@@ -64,6 +80,34 @@ webhooks:
     sideEffects: None
     admissionReviewVersions: ["v1"]
     timeoutSeconds: 3
+  - name: resourcebinding.karmada.io
+    rules:
+      - operations: ["CREATE"]
+        apiGroups: ["work.karmada.io"]
+        apiVersions: ["*"]
+        resources: ["resourcebindings"]
+        scope: "Namespaced"
+    clientConfig:
+      url: https://karmada-webhook.%[1]s.svc:443/mutate-resourcebinding
+      caBundle: %[2]s
+    failurePolicy: Fail
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    timeoutSeconds: 3
+  - name: clusterresourcebinding.karmada.io
+    rules:
+      - operations: ["CREATE"]
+        apiGroups: ["work.karmada.io"]
+        apiVersions: ["*"]
+        resources: ["clusterresourcebindings"]
+        scope: "Cluster"
+    clientConfig:
+      url: https://karmada-webhook.%[1]s.svc:443/mutate-clusterresourcebinding
+      caBundle: %[2]s
+    failurePolicy: Fail
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    timeoutSeconds: 3
   - name: work.karmada.io
     rules:
       - operations: ["CREATE", "UPDATE"]
@@ -77,6 +121,34 @@ webhooks:
     failurePolicy: Fail
     sideEffects: None
     admissionReviewVersions: ["v1"]
+    timeoutSeconds: 3
+  - name: autoscaling.karmada.io
+    rules:
+      - operations: ["CREATE", "UPDATE"]
+        apiGroups: ["autoscaling.karmada.io"]
+        apiVersions: ["*"]
+        resources: ["federatedhpas"]
+        scope: "Namespaced"
+    clientConfig:
+      url: https://karmada-webhook.%[1]s.svc:443/mutate-federatedhpa
+      caBundle: %[2]s
+    failurePolicy: Fail
+    sideEffects: None
+    admissionReviewVersions: [ "v1" ]
+    timeoutSeconds: 3
+  - name: multiclusterservice.karmada.io
+    rules:
+      - operations: ["CREATE", "UPDATE"]
+        apiGroups: ["networking.karmada.io"]
+        apiVersions: ["*"]
+        resources: ["multiclusterservices"]
+        scope: "Namespaced"
+    clientConfig:
+      url: https://karmada-webhook.%[1]s.svc:443/mutate-multiclusterservice
+      caBundle: %[2]s
+    failurePolicy: Fail
+    sideEffects: None
+    admissionReviewVersions: [ "v1" ]
     timeoutSeconds: 3`, systemNamespace, caBundle)
 }
 
@@ -86,7 +158,7 @@ kind: ValidatingWebhookConfiguration
 metadata:
   name: validating-config
   labels:
-    app: validating-config
+    app: karmada-webhook
 webhooks:
   - name: propagationpolicy.karmada.io
     rules:
@@ -171,6 +243,93 @@ webhooks:
     failurePolicy: Fail
     sideEffects: None
     admissionReviewVersions: ["v1"]
+    timeoutSeconds: 10
+  - name: federatedresourcequota.karmada.io
+    rules:
+      - operations: ["CREATE", "UPDATE"]
+        apiGroups: ["policy.karmada.io"]
+        apiVersions: ["*"]
+        resources: ["federatedresourcequotas"]
+        scope: "Namespaced"
+    clientConfig:
+      url: https://karmada-webhook.%[1]s.svc:443/validate-federatedresourcequota
+      caBundle: %[2]s
+    failurePolicy: Fail
+    sideEffects: None
+    admissionReviewVersions: [ "v1" ]
+    timeoutSeconds: 3
+  - name: multiclusteringress.karmada.io
+    rules:
+      - operations: ["CREATE", "UPDATE"]
+        apiGroups: ["networking.karmada.io"]
+        apiVersions: ["*"]
+        resources: ["multiclusteringresses"]
+        scope: "Namespaced"
+    clientConfig:
+      url: https://karmada-webhook.%[1]s.svc:443/validate-multiclusteringress
+      caBundle: %[2]s
+    failurePolicy: Fail
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    timeoutSeconds: 3
+  - name: federatedhpa.karmada.io
+    rules:
+      - operations: ["CREATE", "UPDATE"]
+        apiGroups: ["autoscaling.karmada.io"]
+        apiVersions: ["*"]
+        resources: ["federatedhpas"]
+        scope: "Namespaced"
+    clientConfig:
+      url: https://karmada-webhook.%[1]s.svc:443/validate-federatedhpa
+      caBundle: %[2]s
+    failurePolicy: Fail
+    sideEffects: None
+    admissionReviewVersions: [ "v1" ]
+    timeoutSeconds: 3
+  - name: cronfederatedhpa.karmada.io
+    rules:
+      - operations: ["CREATE", "UPDATE"]
+        apiGroups: ["autoscaling.karmada.io"]
+        apiVersions: ["*"]
+        resources: ["cronfederatedhpas"]
+        scope: "Namespaced"
+    clientConfig:
+      url: https://karmada-webhook.%[1]s.svc:443/validate-cronfederatedhpa
+      caBundle: %[2]s
+    failurePolicy: Fail
+    sideEffects: None
+    admissionReviewVersions: [ "v1" ]
+    timeoutSeconds: 3
+  - name: multiclusterservice.karmada.io
+    rules:
+      - operations: ["CREATE", "UPDATE"]
+        apiGroups: ["networking.karmada.io"]
+        apiVersions: ["*"]
+        resources: ["multiclusterservices"]
+        scope: "Namespaced"
+    clientConfig:
+      url: https://karmada-webhook.%[1]s.svc:443/validate-multiclusterservice
+      caBundle: %[2]s
+    failurePolicy: Fail
+    sideEffects: None
+    admissionReviewVersions: [ "v1" ]
+    timeoutSeconds: 3
+  - name: resourcedeletionprotection.karmada.io
+    rules:
+      - operations: ["DELETE"]
+        apiGroups: ["*"]
+        apiVersions: ["*"]
+        resources: ["*"]
+        scope: "*"
+    clientConfig:
+      url: https://karmada-webhook.%[1]s.svc:443/validate-resourcedeletionprotection
+      caBundle: %[2]s
+    objectSelector:
+      matchExpressions:
+        - { key: "resourcetemplate.karmada.io/deletion-protected", operator: "Exists" }
+    failurePolicy: Fail
+    sideEffects: None
+    admissionReviewVersions: [ "v1" ]
     timeoutSeconds: 3
 `, systemNamespace, caBundle)
 }

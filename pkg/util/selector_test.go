@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package util
 
 import (
@@ -297,322 +313,459 @@ func TestClusterMatches(t *testing.T) {
 			},
 		},
 		Spec: clusterv1alpha1.ClusterSpec{
-			Zone: "zone1",
+			Zones:    []string{"zone1", "zone2", "zone3"},
+			Region:   "region1",
+			Provider: "provider1",
 		},
 	}
 
-	type args struct {
-		affinity policyv1alpha1.ClusterAffinity
-	}
 	tests := []struct {
-		name string
-		args args
-		want bool
+		name     string
+		affinity policyv1alpha1.ClusterAffinity
+		want     bool
 	}{
 		{
-			name: "cluster excluded",
-			args: args{
-				affinity: policyv1alpha1.ClusterAffinity{
-					ExcludeClusters: []string{cluster.Name},
+			name: "test cluster excluded and names",
+			affinity: policyv1alpha1.ClusterAffinity{
+				ExcludeClusters: []string{cluster.Name},
+				ClusterNames:    []string{cluster.Name},
+			},
+			want: false,
+		},
+		{
+			name: "test cluster excluded and label selector",
+			affinity: policyv1alpha1.ClusterAffinity{
+				ExcludeClusters: []string{cluster.Name},
+				LabelSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"foo": "bar"},
 				},
 			},
 			want: false,
 		},
 		{
-			name: "[case 1] labels not matched",
-			args: args{
-				affinity: policyv1alpha1.ClusterAffinity{
-					LabelSelector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{"foo": "unmatched"},
-					},
-					ClusterNames: []string{},
-					FieldSelector: &policyv1alpha1.FieldSelector{
-						MatchExpressions: []corev1.NodeSelectorRequirement{
-							{Key: ZoneField, Operator: corev1.NodeSelectorOpExists},
-						},
-					},
-				},
-			},
-			want: false,
-		},
-		{
-			name: "[case 1] clusterNames not matched",
-			args: args{
-				affinity: policyv1alpha1.ClusterAffinity{
-					LabelSelector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{"foo": "bar"},
-					},
-					ClusterNames: []string{"unmatched"},
-					FieldSelector: &policyv1alpha1.FieldSelector{
-						MatchExpressions: []corev1.NodeSelectorRequirement{
-							{Key: ZoneField, Operator: corev1.NodeSelectorOpExists},
-						},
+			name: "test cluster excluded and field selector",
+			affinity: policyv1alpha1.ClusterAffinity{
+				ExcludeClusters: []string{cluster.Name},
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: ZoneField, Operator: corev1.NodeSelectorOpIn, Values: cluster.Spec.Zones},
 					},
 				},
 			},
 			want: false,
 		},
 		{
-			name: "[case 1] fields not matched",
-			args: args{
-				affinity: policyv1alpha1.ClusterAffinity{
-					LabelSelector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{"foo": "bar"},
-					},
-					ClusterNames: []string{cluster.Name},
-					FieldSelector: &policyv1alpha1.FieldSelector{
-						MatchExpressions: []corev1.NodeSelectorRequirement{
-							{Key: ProviderField, Operator: corev1.NodeSelectorOpExists},
-						},
-					},
-				},
+			name: "test cluster names",
+			affinity: policyv1alpha1.ClusterAffinity{
+				ClusterNames: []string{cluster.Name},
+			},
+			want: true,
+		},
+		{
+			name: "test cluster names not matched",
+			affinity: policyv1alpha1.ClusterAffinity{
+				ClusterNames: []string{"cluster2"},
 			},
 			want: false,
 		},
 		{
-			name: "[case 1] matched",
-			args: args{
-				affinity: policyv1alpha1.ClusterAffinity{
-					LabelSelector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{"foo": "bar"},
-					},
-					ClusterNames: []string{cluster.Name},
-					FieldSelector: &policyv1alpha1.FieldSelector{
-						MatchExpressions: []corev1.NodeSelectorRequirement{
-							{Key: ZoneField, Operator: corev1.NodeSelectorOpExists},
-						},
+			name: "test cluster names and label selector",
+			affinity: policyv1alpha1.ClusterAffinity{
+				LabelSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"foo": "bar"},
+				},
+				ClusterNames: []string{cluster.Name},
+			},
+			want: true,
+		},
+		{
+			name: "test cluster names and label selector not matched",
+			affinity: policyv1alpha1.ClusterAffinity{
+				LabelSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"foo": "unmatched"},
+				},
+				ClusterNames: []string{cluster.Name},
+			},
+			want: false,
+		},
+		{
+			name: "test cluster names and field selector(zone & region)",
+			affinity: policyv1alpha1.ClusterAffinity{
+				ClusterNames: []string{cluster.Name},
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: ZoneField, Operator: corev1.NodeSelectorOpIn, Values: cluster.Spec.Zones},
+						{Key: RegionField, Operator: corev1.NodeSelectorOpIn, Values: []string{cluster.Spec.Region}},
 					},
 				},
 			},
 			want: true,
 		},
 		{
-			name: "[case 2] labels not matched",
-			args: args{
-				affinity: policyv1alpha1.ClusterAffinity{
-					LabelSelector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{"foo": "unmatched"},
-					},
-				},
-			},
-			want: false,
-		},
-		{
-			name: "[case 2] labels matched",
-			args: args{
-				affinity: policyv1alpha1.ClusterAffinity{
-					LabelSelector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{"foo": "bar"},
+			name: "test cluster names and field selector(provider)",
+			affinity: policyv1alpha1.ClusterAffinity{
+				ClusterNames: []string{cluster.Name},
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: ProviderField, Operator: corev1.NodeSelectorOpIn, Values: []string{cluster.Spec.Provider}},
 					},
 				},
 			},
 			want: true,
 		},
 		{
-			name: "[case 3] labels not matched",
-			args: args{
-				affinity: policyv1alpha1.ClusterAffinity{
-					LabelSelector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{"foo": "unmatched"},
-					},
-					ClusterNames: []string{cluster.Name},
-				},
-			},
-			want: false,
-		},
-		{
-			name: "[case 3] clusterNames not matched",
-			args: args{
-				affinity: policyv1alpha1.ClusterAffinity{
-					LabelSelector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{"foo": "bar"},
-					},
-					ClusterNames: []string{"unmatched"},
-				},
-			},
-			want: false,
-		},
-		{
-			name: "[case 3] matched",
-			args: args{
-				affinity: policyv1alpha1.ClusterAffinity{
-					LabelSelector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{"foo": "bar"},
-					},
-					ClusterNames: []string{cluster.Name},
-				},
-			},
-			want: true,
-		},
-		{
-			name: "[case 4] labels not matched",
-			args: args{
-				affinity: policyv1alpha1.ClusterAffinity{
-					LabelSelector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{"foo": "unmatched"},
-					},
-					FieldSelector: &policyv1alpha1.FieldSelector{
-						MatchExpressions: []corev1.NodeSelectorRequirement{
-							{Key: ZoneField, Operator: corev1.NodeSelectorOpExists},
-						},
-					},
-				},
-			},
-			want: false,
-		},
-		{
-			name: "[case 4] fields not matched",
-			args: args{
-				affinity: policyv1alpha1.ClusterAffinity{
-					LabelSelector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{"foo": "bar"},
-					},
-					FieldSelector: &policyv1alpha1.FieldSelector{
-						MatchExpressions: []corev1.NodeSelectorRequirement{
-							{Key: ProviderField, Operator: corev1.NodeSelectorOpExists},
-						},
-					},
-				},
-			},
-			want: false,
-		},
-		{
-			name: "[case 4] matched",
-			args: args{
-				affinity: policyv1alpha1.ClusterAffinity{
-					LabelSelector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{"foo": "bar"},
-					},
-					FieldSelector: &policyv1alpha1.FieldSelector{
-						MatchExpressions: []corev1.NodeSelectorRequirement{
-							{Key: ZoneField, Operator: corev1.NodeSelectorOpExists},
-						},
+			name: "test cluster names and field selector(region)",
+			affinity: policyv1alpha1.ClusterAffinity{
+				ClusterNames: []string{cluster.Name},
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: RegionField, Operator: corev1.NodeSelectorOpIn, Values: []string{cluster.Spec.Region}},
 					},
 				},
 			},
 			want: true,
 		},
 		{
-			name: "[case 5] clusterNames matched",
-			args: args{
-				affinity: policyv1alpha1.ClusterAffinity{
-					ClusterNames: []string{"unmatched"},
-					FieldSelector: &policyv1alpha1.FieldSelector{
-						MatchExpressions: []corev1.NodeSelectorRequirement{
-							{Key: ZoneField, Operator: corev1.NodeSelectorOpExists},
-						},
+			name: "test cluster names and field selector(zone not in)",
+			affinity: policyv1alpha1.ClusterAffinity{
+				ClusterNames: []string{cluster.Name},
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: ZoneField, Operator: corev1.NodeSelectorOpNotIn, Values: cluster.Spec.Zones},
 					},
 				},
 			},
 			want: false,
 		},
 		{
-			name: "[case 5] fields matched",
-			args: args{
-				affinity: policyv1alpha1.ClusterAffinity{
-					ClusterNames: []string{cluster.Name},
-					FieldSelector: &policyv1alpha1.FieldSelector{
-						MatchExpressions: []corev1.NodeSelectorRequirement{
-							{Key: ProviderField, Operator: corev1.NodeSelectorOpExists},
-						},
+			name: "test cluster names and field selector(provider not in)",
+			affinity: policyv1alpha1.ClusterAffinity{
+				ClusterNames: []string{cluster.Name},
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: ProviderField, Operator: corev1.NodeSelectorOpNotIn, Values: []string{cluster.Spec.Provider}},
 					},
 				},
 			},
 			want: false,
 		},
 		{
-			name: "[case 5] matched",
-			args: args{
-				affinity: policyv1alpha1.ClusterAffinity{
-					ClusterNames: []string{cluster.Name},
-					FieldSelector: &policyv1alpha1.FieldSelector{
-						MatchExpressions: []corev1.NodeSelectorRequirement{
-							{Key: ZoneField, Operator: corev1.NodeSelectorOpExists},
-						},
+			name: "test cluster names and field selector(region not in)",
+			affinity: policyv1alpha1.ClusterAffinity{
+				ClusterNames: []string{cluster.Name},
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: RegionField, Operator: corev1.NodeSelectorOpNotIn, Values: []string{cluster.Spec.Region}},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "test label selector and field selector(zone)",
+			affinity: policyv1alpha1.ClusterAffinity{
+				LabelSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"foo": "bar"},
+				},
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: ZoneField, Operator: corev1.NodeSelectorOpIn, Values: cluster.Spec.Zones},
 					},
 				},
 			},
 			want: true,
 		},
 		{
-			name: "[case 6] clusterNames not matched",
-			args: args{
-				affinity: policyv1alpha1.ClusterAffinity{
-					ClusterNames: []string{"unmatched"},
+			name: "test label selector and field selector(provider)",
+			affinity: policyv1alpha1.ClusterAffinity{
+				LabelSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"foo": "bar"},
 				},
-			},
-			want: false,
-		},
-		{
-			name: "[case 6] matched",
-			args: args{
-				affinity: policyv1alpha1.ClusterAffinity{
-					ClusterNames: []string{cluster.Name},
-				},
-			},
-			want: true,
-		},
-		{
-			name: "[case 7] fields not matched",
-			args: args{
-				affinity: policyv1alpha1.ClusterAffinity{
-					FieldSelector: &policyv1alpha1.FieldSelector{
-						MatchExpressions: []corev1.NodeSelectorRequirement{
-							{Key: ProviderField, Operator: corev1.NodeSelectorOpExists},
-						},
-					},
-				},
-			},
-			want: false,
-		},
-		{
-			name: "[case 7] matched",
-			args: args{
-				affinity: policyv1alpha1.ClusterAffinity{
-					FieldSelector: &policyv1alpha1.FieldSelector{
-						MatchExpressions: []corev1.NodeSelectorRequirement{
-							{Key: ZoneField, Operator: corev1.NodeSelectorOpExists},
-						},
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: ProviderField, Operator: corev1.NodeSelectorOpIn, Values: []string{cluster.Spec.Provider}},
 					},
 				},
 			},
 			want: true,
 		},
 		{
-			name: "[case 8] matched",
-			args: args{
-				affinity: policyv1alpha1.ClusterAffinity{},
+			name: "test label selector and field selector(region)",
+			affinity: policyv1alpha1.ClusterAffinity{
+				LabelSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"foo": "bar"},
+				},
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: RegionField, Operator: corev1.NodeSelectorOpIn, Values: []string{cluster.Spec.Region}},
+					},
+				},
 			},
 			want: true,
 		},
 		{
-			name: "selector error",
-			args: args{
-				affinity: policyv1alpha1.ClusterAffinity{
-					LabelSelector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{"": "bar"},
+			name: "test label selector and field selector(zone not in)",
+			affinity: policyv1alpha1.ClusterAffinity{
+				LabelSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"foo": "bar"},
+				},
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: ZoneField, Operator: corev1.NodeSelectorOpNotIn, Values: cluster.Spec.Zones},
 					},
 				},
 			},
 			want: false,
 		},
 		{
-			name: "fields matched",
-			args: args{
-				affinity: policyv1alpha1.ClusterAffinity{
-					FieldSelector: &policyv1alpha1.FieldSelector{
-						MatchExpressions: []corev1.NodeSelectorRequirement{
-							{Key: ""},
-						},
+			name: "test label selector and field selector(provider)",
+			affinity: policyv1alpha1.ClusterAffinity{
+				LabelSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"foo": "bar"},
+				},
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: ProviderField, Operator: corev1.NodeSelectorOpNotIn, Values: []string{cluster.Spec.Provider}},
 					},
 				},
+			},
+			want: false,
+		},
+		{
+			name: "test label selector and field selector(region)",
+			affinity: policyv1alpha1.ClusterAffinity{
+				LabelSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"foo": "bar"},
+				},
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: RegionField, Operator: corev1.NodeSelectorOpNotIn, Values: []string{cluster.Spec.Region}},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "test label selector",
+			affinity: policyv1alpha1.ClusterAffinity{
+				LabelSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"foo": "bar"},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "test label selector not matched",
+			affinity: policyv1alpha1.ClusterAffinity{
+				LabelSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"foo": "unmatched"},
+				},
+			},
+			want: false,
+		},
+		{
+			name:     "test empty cluster affinity matched",
+			affinity: policyv1alpha1.ClusterAffinity{},
+			want:     true,
+		},
+		{
+			name: "test label selector error",
+			affinity: policyv1alpha1.ClusterAffinity{
+				LabelSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"": "bar"},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "test field selector error",
+			affinity: policyv1alpha1.ClusterAffinity{
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: ""},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "test field selector zone matched",
+			affinity: policyv1alpha1.ClusterAffinity{
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: ZoneField, Operator: corev1.NodeSelectorOpIn, Values: cluster.Spec.Zones},
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "test field selector zone not matched",
+			affinity: policyv1alpha1.ClusterAffinity{
+				ClusterNames: []string{cluster.Name},
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: ZoneField, Operator: corev1.NodeSelectorOpNotIn, Values: cluster.Spec.Zones},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "test field selector zone not matched",
+			affinity: policyv1alpha1.ClusterAffinity{
+				ClusterNames: []string{cluster.Name},
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: ZoneField, Operator: corev1.NodeSelectorOpIn, Values: []string{"zone2"}},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "test field selector region matched",
+			affinity: policyv1alpha1.ClusterAffinity{
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: RegionField, Operator: corev1.NodeSelectorOpIn, Values: []string{cluster.Spec.Region}},
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "test field selector region not matched",
+			affinity: policyv1alpha1.ClusterAffinity{
+				ClusterNames: []string{cluster.Name},
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: RegionField, Operator: corev1.NodeSelectorOpNotIn, Values: []string{cluster.Spec.Region}},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "test field selector region not matched",
+			affinity: policyv1alpha1.ClusterAffinity{
+				ClusterNames: []string{cluster.Name},
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: RegionField, Operator: corev1.NodeSelectorOpIn, Values: []string{"region2"}},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "test field selector provider matched",
+			affinity: policyv1alpha1.ClusterAffinity{
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: ProviderField, Operator: corev1.NodeSelectorOpIn, Values: []string{cluster.Spec.Provider}},
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "test field selector provider not matched",
+			affinity: policyv1alpha1.ClusterAffinity{
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: ProviderField, Operator: corev1.NodeSelectorOpNotIn, Values: []string{cluster.Spec.Provider}},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "test field selector provider not matched",
+			affinity: policyv1alpha1.ClusterAffinity{
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: ProviderField, Operator: corev1.NodeSelectorOpIn, Values: []string{"provider2"}},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "test field selector other key not matched",
+			affinity: policyv1alpha1.ClusterAffinity{
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: "metadata.name", Operator: corev1.NodeSelectorOpIn, Values: []string{cluster.Name}},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "test field selector cluster names and label selector",
+			affinity: policyv1alpha1.ClusterAffinity{
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: ZoneField, Operator: corev1.NodeSelectorOpIn, Values: cluster.Spec.Zones},
+					},
+				},
+				LabelSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"foo": "bar"},
+				},
+				ClusterNames: []string{cluster.Name},
+			},
+			want: true,
+		},
+		{
+			name: "test field selector cluster names and label selector not matched",
+			affinity: policyv1alpha1.ClusterAffinity{
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: ZoneField, Operator: corev1.NodeSelectorOpIn, Values: cluster.Spec.Zones},
+					},
+				},
+				LabelSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"foo": "bar"},
+				},
+				ClusterNames: []string{"cluster2"},
+			},
+			want: false,
+		},
+		{
+			name: "test field selector cluster names and label selector not matched",
+			affinity: policyv1alpha1.ClusterAffinity{
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: ZoneField, Operator: corev1.NodeSelectorOpNotIn, Values: cluster.Spec.Zones},
+					},
+				},
+				LabelSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"foo": "bar"},
+				},
+				ClusterNames: []string{cluster.Name},
+			},
+			want: false,
+		},
+		{
+			name: "test field selector cluster names and label selector not matched",
+			affinity: policyv1alpha1.ClusterAffinity{
+				FieldSelector: &policyv1alpha1.FieldSelector{
+					MatchExpressions: []corev1.NodeSelectorRequirement{
+						{Key: ZoneField, Operator: corev1.NodeSelectorOpIn, Values: cluster.Spec.Zones},
+					},
+				},
+				LabelSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"foo": "Unmatched"},
+				},
+				ClusterNames: []string{cluster.Name},
 			},
 			want: false,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := ClusterMatches(cluster, tt.args.affinity); got != tt.want {
+			if got := ClusterMatches(cluster, tt.affinity); got != tt.want {
 				t.Errorf("ClusterMatches() = %v, want %v", got, tt.want)
 			}
 		})
@@ -814,33 +967,18 @@ func Test_extractClusterFields(t *testing.T) {
 			},
 		},
 		{
-			name: "zone is set",
-			args: args{
-				cluster: &clusterv1alpha1.Cluster{
-					Spec: clusterv1alpha1.ClusterSpec{
-						Zone: "foo",
-					},
-				},
-			},
-			want: labels.Set{
-				ZoneField: "foo",
-			},
-		},
-		{
 			name: "all are set",
 			args: args{
 				cluster: &clusterv1alpha1.Cluster{
 					Spec: clusterv1alpha1.ClusterSpec{
 						Provider: "foo",
 						Region:   "bar",
-						Zone:     "baz",
 					},
 				},
 			},
 			want: labels.Set{
 				ProviderField: "foo",
 				RegionField:   "bar",
-				ZoneField:     "baz",
 			},
 		},
 	}
@@ -848,6 +986,103 @@ func Test_extractClusterFields(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := extractClusterFields(tt.args.cluster); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("extractClusterFields() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func Test_matchZones(t *testing.T) {
+	tests := []struct {
+		name                string
+		zoneMatchExpression *corev1.NodeSelectorRequirement
+		zones               []string
+		matched             bool
+	}{
+		{
+			name: "empty zones for In operator",
+			zoneMatchExpression: &corev1.NodeSelectorRequirement{
+				Key:      ZoneField,
+				Operator: corev1.NodeSelectorOpIn,
+				Values:   []string{"foo"},
+			},
+			zones:   nil,
+			matched: false,
+		},
+		{
+			name: "partial zones for In operator",
+			zoneMatchExpression: &corev1.NodeSelectorRequirement{
+				Key:      ZoneField,
+				Operator: corev1.NodeSelectorOpIn,
+				Values:   []string{"foo"},
+			},
+			zones:   []string{"foo", "bar"},
+			matched: false,
+		},
+		{
+			name: "all zones for In operator",
+			zoneMatchExpression: &corev1.NodeSelectorRequirement{
+				Key:      ZoneField,
+				Operator: corev1.NodeSelectorOpIn,
+				Values:   []string{"foo", "bar"},
+			},
+			zones:   []string{"foo", "bar"},
+			matched: true,
+		},
+		{
+			name: "empty zones for NotIn operator",
+			zoneMatchExpression: &corev1.NodeSelectorRequirement{
+				Key:      ZoneField,
+				Operator: corev1.NodeSelectorOpNotIn,
+				Values:   []string{"foo"},
+			},
+			zones:   nil,
+			matched: true,
+		},
+		{
+			name: "partial zones for NotIn operator",
+			zoneMatchExpression: &corev1.NodeSelectorRequirement{
+				Key:      ZoneField,
+				Operator: corev1.NodeSelectorOpNotIn,
+				Values:   []string{"foo"},
+			},
+			zones:   []string{"foo", "bar"},
+			matched: false,
+		},
+		{
+			name: "empty zones for Exists operator",
+			zoneMatchExpression: &corev1.NodeSelectorRequirement{
+				Key:      ZoneField,
+				Operator: corev1.NodeSelectorOpExists,
+				Values:   nil,
+			},
+			zones:   nil,
+			matched: false,
+		},
+		{
+			name: "empty zones for DoesNotExist operator",
+			zoneMatchExpression: &corev1.NodeSelectorRequirement{
+				Key:      ZoneField,
+				Operator: corev1.NodeSelectorOpDoesNotExist,
+				Values:   nil,
+			},
+			zones:   nil,
+			matched: true,
+		},
+		{
+			name: "unknown operator",
+			zoneMatchExpression: &corev1.NodeSelectorRequirement{
+				Key:      ZoneField,
+				Operator: corev1.NodeSelectorOpGt,
+				Values:   nil,
+			},
+			zones:   []string{"foo"},
+			matched: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := matchZones(tt.zoneMatchExpression, tt.zones); got != tt.matched {
+				t.Errorf("matchZones() got %v, but expected %v", got, tt.matched)
 			}
 		})
 	}

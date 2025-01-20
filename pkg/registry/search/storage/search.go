@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package storage
 
 import (
@@ -6,6 +22,7 @@ import (
 	"net/http"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	genericrequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
@@ -20,6 +37,7 @@ import (
 type SearchREST struct {
 	multiClusterInformerManager genericmanager.MultiClusterInformerManager
 	clusterLister               clusterlister.ClusterLister
+	restMapper                  meta.RESTMapper
 
 	// add needed parameters here
 }
@@ -27,14 +45,17 @@ type SearchREST struct {
 var _ rest.Scoper = &SearchREST{}
 var _ rest.Storage = &SearchREST{}
 var _ rest.Connecter = &SearchREST{}
+var _ rest.SingularNameProvider = &SearchREST{}
 
 // NewSearchREST returns a RESTStorage object that will work against search.
 func NewSearchREST(
 	multiClusterInformerManager genericmanager.MultiClusterInformerManager,
-	clusterLister clusterlister.ClusterLister) *SearchREST {
+	clusterLister clusterlister.ClusterLister,
+	restMapper meta.RESTMapper) *SearchREST {
 	return &SearchREST{
 		multiClusterInformerManager: multiClusterInformerManager,
 		clusterLister:               clusterLister,
+		restMapper:                  restMapper,
 	}
 }
 
@@ -97,4 +118,9 @@ func (r *SearchREST) Connect(ctx context.Context, id string, _ runtime.Object, r
 func (r *SearchREST) Destroy() {
 	// Given no underlying store, so we don't
 	// need to destroy anything.
+}
+
+// GetSingularName returns singular name of resources
+func (r *SearchREST) GetSingularName() string {
+	return "search"
 }

@@ -1,14 +1,30 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package addons
 
 import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"k8s.io/klog/v2"
 	"k8s.io/kubectl/pkg/util/templates"
 
 	addoninit "github.com/karmada-io/karmada/pkg/karmadactl/addons/init"
-	"github.com/karmada-io/karmada/pkg/version"
+	"github.com/karmada-io/karmada/pkg/karmadactl/cmdinit/options"
+	globaloptions "github.com/karmada-io/karmada/pkg/karmadactl/options"
 )
 
 var (
@@ -32,9 +48,9 @@ var (
 	%[1]s enable karmada-search --karmada-kubeconfig /etc/karmada/karmada-apiserver.config
 
 	# Specify the karmada-search image
-	%[1]s enable karmada-search --karmada-search-image docker.io/karmada/karmada-scheduler-estimator:latest
+	%[1]s enable karmada-search --karmada-search-image docker.io/karmada/karmada-search:latest
 
-	# Sepcify the namespace where Karmada components are installed
+	# Specify the namespace where Karmada components are installed
 	%[1]s enable karmada-search --namespace karmada-system
 	`)
 )
@@ -49,7 +65,7 @@ func NewCmdAddonsEnable(parentCommand string) *cobra.Command {
 		Example:               fmt.Sprintf(enableExample, parentCommand),
 		SilenceUsage:          true,
 		DisableFlagsInUseLine: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, args []string) error {
 			if err := opts.Complete(); err != nil {
 				return err
 			}
@@ -63,23 +79,21 @@ func NewCmdAddonsEnable(parentCommand string) *cobra.Command {
 		},
 	}
 
-	releaseVer, err := version.ParseGitVersion(version.Get().GitVersion)
-	if err != nil {
-		klog.Infof("No default release version found. build version: %s", version.Get().String())
-		releaseVer = &version.ReleaseVersion{} // initialize to avoid panic
-	}
-
-	flags := cmd.PersistentFlags()
+	flags := cmd.Flags()
 	opts.GlobalCommandOptions.AddFlags(flags)
-	flags.IntVar(&opts.WaitPodReadyTimeout, "pod-timeout", 30, "Wait pod ready timeout.")
+	flags.StringVarP(&opts.ImageRegistry, "private-image-registry", "", "", "Private image registry where pull images from. If set, all required images will be downloaded from it, it would be useful in offline installation scenarios.")
+	flags.IntVar(&opts.WaitComponentReadyTimeout, "pod-timeout", options.WaitComponentReadyTimeout, "Wait pod ready timeout.")
 	flags.IntVar(&opts.WaitAPIServiceReadyTimeout, "apiservice-timeout", 30, "Wait apiservice ready timeout.")
-	flags.StringVar(&opts.KarmadaSearchImage, "karmada-search-image", fmt.Sprintf("docker.io/karmada/karmada-search:%s", releaseVer.PatchRelease()), "karmada search image")
-	flags.Int32Var(&opts.KarmadaSearchReplicas, "karmada-search-replicas", 1, "Karmada search replica set")
-	flags.StringVar(&opts.KarmadaDeschedulerImage, "karmada-descheduler-image", fmt.Sprintf("docker.io/karmada/karmada-descheduler:%s", releaseVer.PatchRelease()), "karmada descheduler image")
-	flags.Int32Var(&opts.KarmadaDeschedulerReplicas, "karmada-descheduler-replicas", 1, "Karmada descheduler replica set")
-	flags.StringVar(&opts.KarmadaSchedulerEstimatorImage, "karmada-scheduler-estimator-image", fmt.Sprintf("docker.io/karmada/karmada-scheduler-estimator:%s", releaseVer.PatchRelease()), "karmada scheduler-estimator image")
-	flags.Int32Var(&opts.KarmadaEstimatorReplicas, "karmada-estimator-replicas", 1, "Karmada scheduler estimator replica set")
+	flags.Int32Var(&opts.KarmadaSearchReplicas, "karmada-search-replicas", 1, "Karmada-search replica set")
+	flags.StringVar(&opts.KarmadaSearchImage, "karmada-search-image", addoninit.DefaultKarmadaSearchImage, "karmada-search image")
+	flags.Int32Var(&opts.KarmadaMetricsAdapterReplicas, "karmada-metrics-adapter-replicas", 1, "karmada-metrics-adapter replica set")
+	flags.StringVar(&opts.KarmadaMetricsAdapterImage, "karmada-metrics-adapter-image", addoninit.DefaultKarmadaMetricsAdapterImage, "karmada-metrics-adapter image")
+	flags.StringVar(&opts.KarmadaDeschedulerImage, "karmada-descheduler-image", addoninit.DefaultKarmadaDeschedulerImage, "karmada-descheduler image")
+	flags.Int32Var(&opts.KarmadaDeschedulerReplicas, "karmada-descheduler-replicas", 1, "karmada descheduler replica set")
+	flags.StringVar(&opts.KarmadaSchedulerEstimatorImage, "karmada-scheduler-estimator-image", addoninit.DefaultKarmadaSchedulerEstimatorImage, "karmada-scheduler-estimator image")
+	flags.Int32Var(&opts.KarmadaEstimatorReplicas, "karmada-estimator-replicas", 1, "karmada-scheduler-estimator replica set")
 	flags.StringVar(&opts.MemberKubeConfig, "member-kubeconfig", "", "Member cluster's kubeconfig which to deploy scheduler estimator")
 	flags.StringVar(&opts.MemberContext, "member-context", "", "Member cluster's context which to deploy scheduler estimator")
+	flags.StringVar(&opts.HostClusterDomain, "host-cluster-domain", globaloptions.DefaultHostClusterDomain, "The cluster domain of karmada host cluster. (e.g. --host-cluster-domain=host.karmada)")
 	return cmd
 }

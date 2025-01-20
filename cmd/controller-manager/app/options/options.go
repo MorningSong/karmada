@@ -1,7 +1,24 @@
+/*
+Copyright 2020 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package options
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -10,15 +27,12 @@ import (
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	componentbaseconfig "k8s.io/component-base/config"
 
+	"github.com/karmada-io/karmada/pkg/controllers/federatedhpa/config"
 	"github.com/karmada-io/karmada/pkg/features"
 	"github.com/karmada-io/karmada/pkg/sharedcli/profileflag"
 	"github.com/karmada-io/karmada/pkg/sharedcli/ratelimiterflag"
 	"github.com/karmada-io/karmada/pkg/util"
-)
-
-const (
-	defaultBindAddress = "0.0.0.0"
-	defaultPort        = 10357
+	"github.com/karmada-io/karmada/pkg/util/names"
 )
 
 var (
@@ -37,11 +51,6 @@ type Options struct {
 	Controllers []string
 	// LeaderElection defines the configuration of leader election client.
 	LeaderElection componentbaseconfig.LeaderElectionConfiguration
-	// BindAddress is the IP address on which to listen for the --secure-port port.
-	BindAddress string
-	// SecurePort is the port that the the server serves at.
-	// Note: We hope support https in the future once controller-runtime provides the functionality.
-	SecurePort int
 	// ClusterStatusUpdateFrequency is the frequency that controller computes and report cluster status.
 	// It must work with ClusterMonitorGracePeriod(--cluster-monitor-grace-period) in karmada-controller-manager.
 	ClusterStatusUpdateFrequency metav1.Duration
@@ -94,6 +103,11 @@ type Options struct {
 	// It can be set to "0" to disable the metrics serving.
 	// Defaults to ":8080".
 	MetricsBindAddress string
+	// HealthProbeBindAddress is the TCP address that the controller should bind to
+	// for serving health probes
+	// It can be set to "0" to disable serving the health probe.
+	// Defaults to ":10357".
+	HealthProbeBindAddress string
 	// ConcurrentClusterSyncs is the number of cluster objects that are
 	// allowed to sync concurrently.
 	ConcurrentClusterSyncs int
@@ -109,8 +123,14 @@ type Options struct {
 	// ConcurrentNamespaceSyncs is the number of Namespace objects that are
 	// allowed to sync concurrently.
 	ConcurrentNamespaceSyncs int
+	// ConcurrentPropagationPolicySyncs is the number of PropagationPolicy that are allowed to sync concurrently.
+	ConcurrentPropagationPolicySyncs int
+	// ConcurrentClusterPropagationPolicySyncs is the number of ClusterPropagationPolicy that are allowed to sync concurrently.
+	ConcurrentClusterPropagationPolicySyncs int
 	// ConcurrentResourceTemplateSyncs is the number of resource templates that are allowed to sync concurrently.
 	ConcurrentResourceTemplateSyncs int
+	// ConcurrentDependentResourceSyncs is the number of dependent resource that are allowed to sync concurrently.
+	ConcurrentDependentResourceSyncs int
 	// If set to true enables NoExecute Taints and will evict all not-tolerating
 	// objects propagating on Clusters tainted with this kind of Taints.
 	EnableTaintManager bool
@@ -118,8 +138,9 @@ type Options struct {
 	// removal since the workload(resource) has been moved to the graceful eviction tasks.
 	GracefulEvictionTimeout metav1.Duration
 
-	RateLimiterOpts ratelimiterflag.Options
-	ProfileOpts     profileflag.Options
+	RateLimiterOpts            ratelimiterflag.Options
+	ProfileOpts                profileflag.Options
+	HPAControllerConfiguration config.HPAControllerConfiguration
 	// EnableClusterResourceModeling indicates if enable cluster resource modeling.
 	// The resource modeling might be used by the scheduler to make scheduling decisions
 	// in scenario of dynamic replica assignment based on cluster free resources.
@@ -133,8 +154,8 @@ func NewOptions() *Options {
 		LeaderElection: componentbaseconfig.LeaderElectionConfiguration{
 			LeaderElect:       true,
 			ResourceLock:      resourcelock.LeasesResourceLock,
-			ResourceNamespace: util.NamespaceKarmadaSystem,
-			ResourceName:      "karmada-controller-manager",
+			ResourceNamespace: names.NamespaceKarmadaSystem,
+			ResourceName:      names.KarmadaControllerManagerComponentName,
 		},
 	}
 }
@@ -145,14 +166,10 @@ func (o *Options) AddFlags(flags *pflag.FlagSet, allControllers, disabledByDefau
 		"A list of controllers to enable. '*' enables all on-by-default controllers, 'foo' enables the controller named 'foo', '-foo' disables the controller named 'foo'. \nAll controllers: %s.\nDisabled-by-default controllers: %s",
 		strings.Join(allControllers, ", "), strings.Join(disabledByDefaultControllers, ", "),
 	))
-	flags.StringVar(&o.BindAddress, "bind-address", defaultBindAddress,
-		"The IP address on which to listen for the --secure-port port.")
-	flags.IntVar(&o.SecurePort, "secure-port", defaultPort,
-		"The secure port on which to serve HTTPS.")
 	flags.DurationVar(&o.ClusterStatusUpdateFrequency.Duration, "cluster-status-update-frequency", 10*time.Second,
 		"Specifies how often karmada-controller-manager posts cluster status to karmada-apiserver.")
 	flags.BoolVar(&o.LeaderElection.LeaderElect, "leader-elect", true, "Start a leader election client and gain leadership before executing the main loop. Enable this when running replicated components for high availability.")
-	flags.StringVar(&o.LeaderElection.ResourceNamespace, "leader-elect-resource-namespace", util.NamespaceKarmadaSystem, "The namespace of resource object that is used for locking during leader election.")
+	flags.StringVar(&o.LeaderElection.ResourceNamespace, "leader-elect-resource-namespace", names.NamespaceKarmadaSystem, "The namespace of resource object that is used for locking during leader election.")
 	flags.DurationVar(&o.LeaderElection.LeaseDuration.Duration, "leader-elect-lease-duration", defaultElectionLeaseDuration.Duration, ""+
 		"The duration that non-leader candidates will wait after observing a leadership "+
 		"renewal until attempting to acquire leadership of a led but unrenewed leader "+
@@ -184,23 +201,28 @@ func (o *Options) AddFlags(flags *pflag.FlagSet, allControllers, disabledByDefau
 		"<group> for skip resources with a specific API group(e.g. networking.k8s.io),\n"+
 		"<group>/<version> for skip resources with a specific API version(e.g. networking.k8s.io/v1beta1),\n"+
 		"<group>/<version>/<kind>,<kind> for skip one or more specific resource(e.g. networking.k8s.io/v1beta1/Ingress,IngressClass) where the kinds are case-insensitive.")
-	flags.StringSliceVar(&o.SkippedPropagatingNamespaces, "skipped-propagating-namespaces", []string{},
-		"Comma-separated namespaces that should be skipped from propagating in addition to the default skipped namespaces(karmada-system, karmada-cluster, namespaces prefixed by kube- and karmada-es-).")
+	flags.StringSliceVar(&o.SkippedPropagatingNamespaces, "skipped-propagating-namespaces", []string{"kube-.*"},
+		"Comma-separated namespaces that should be skipped from propagating.\n"+
+			"Note: 'karmada-system', 'karmada-cluster' and 'karmada-es-.*' are Karmada reserved namespaces that will always be skipped.")
 	flags.StringVar(&o.ClusterAPIContext, "cluster-api-context", "", "Name of the cluster context in cluster-api management cluster kubeconfig file.")
 	flags.StringVar(&o.ClusterAPIKubeconfig, "cluster-api-kubeconfig", "", "Path to the cluster-api management cluster kubeconfig file.")
-	flags.Float32Var(&o.ClusterAPIQPS, "cluster-api-qps", 40.0, "QPS to use while talking with cluster kube-apiserver. Doesn't cover events and node heartbeat apis which rate limiting is controlled by a different set of flags.")
-	flags.IntVar(&o.ClusterAPIBurst, "cluster-api-burst", 60, "Burst to use while talking with cluster kube-apiserver. Doesn't cover events and node heartbeat apis which rate limiting is controlled by a different set of flags.")
-	flags.Float32Var(&o.KubeAPIQPS, "kube-api-qps", 40.0, "QPS to use while talking with karmada-apiserver. Doesn't cover events and node heartbeat apis which rate limiting is controlled by a different set of flags.")
-	flags.IntVar(&o.KubeAPIBurst, "kube-api-burst", 60, "Burst to use while talking with karmada-apiserver. Doesn't cover events and node heartbeat apis which rate limiting is controlled by a different set of flags.")
+	flags.Float32Var(&o.ClusterAPIQPS, "cluster-api-qps", 40.0, "QPS to use while talking with cluster kube-apiserver.")
+	flags.IntVar(&o.ClusterAPIBurst, "cluster-api-burst", 60, "Burst to use while talking with cluster kube-apiserver.")
+	flags.Float32Var(&o.KubeAPIQPS, "kube-api-qps", 40.0, "QPS to use while talking with karmada-apiserver.")
+	flags.IntVar(&o.KubeAPIBurst, "kube-api-burst", 60, "Burst to use while talking with karmada-apiserver.")
 	flags.DurationVar(&o.ClusterCacheSyncTimeout.Duration, "cluster-cache-sync-timeout", util.CacheSyncTimeout, "Timeout period waiting for cluster cache to sync.")
 	flags.DurationVar(&o.ResyncPeriod.Duration, "resync-period", 0, "Base frequency the informers are resynced.")
 	flags.StringVar(&o.MetricsBindAddress, "metrics-bind-address", ":8080", "The TCP address that the controller should bind to for serving prometheus metrics(e.g. 127.0.0.1:8080, :8080). It can be set to \"0\" to disable the metrics serving.")
+	flags.StringVar(&o.HealthProbeBindAddress, "health-probe-bind-address", ":10357", "The TCP address that the controller should bind to for serving health probes(e.g. 127.0.0.1:10357, :10357). It can be set to \"0\" to disable serving the health probe. Defaults to 0.0.0.0:10357.")
 	flags.IntVar(&o.ConcurrentClusterSyncs, "concurrent-cluster-syncs", 5, "The number of Clusters that are allowed to sync concurrently.")
 	flags.IntVar(&o.ConcurrentClusterResourceBindingSyncs, "concurrent-clusterresourcebinding-syncs", 5, "The number of ClusterResourceBindings that are allowed to sync concurrently.")
 	flags.IntVar(&o.ConcurrentResourceBindingSyncs, "concurrent-resourcebinding-syncs", 5, "The number of ResourceBindings that are allowed to sync concurrently.")
 	flags.IntVar(&o.ConcurrentWorkSyncs, "concurrent-work-syncs", 5, "The number of Works that are allowed to sync concurrently.")
 	flags.IntVar(&o.ConcurrentNamespaceSyncs, "concurrent-namespace-syncs", 1, "The number of Namespaces that are allowed to sync concurrently.")
+	flags.IntVar(&o.ConcurrentPropagationPolicySyncs, "concurrent-propagation-policy-syncs", 1, "The number of PropagationPolicy that are allowed to sync concurrently.")
+	flags.IntVar(&o.ConcurrentClusterPropagationPolicySyncs, "concurrent-cluster-propagation-policy-syncs", 1, "The number of ClusterPropagationPolicy that are allowed to sync concurrently.")
 	flags.IntVar(&o.ConcurrentResourceTemplateSyncs, "concurrent-resource-template-syncs", 5, "The number of resource templates that are allowed to sync concurrently.")
+	flags.IntVar(&o.ConcurrentDependentResourceSyncs, "concurrent-dependent-resource-syncs", 2, "The number of dependent resource that are allowed to sync concurrently.")
 	flags.BoolVar(&o.EnableTaintManager, "enable-taint-manager", true, "If set to true enables NoExecute Taints and will evict all not-tolerating objects propagating on Clusters tainted with this kind of Taints.")
 	flags.DurationVar(&o.GracefulEvictionTimeout.Duration, "graceful-eviction-timeout", 10*time.Minute, "Specifies the timeout period waiting for the graceful-eviction-controller performs the final removal since the workload(resource) has been moved to the graceful eviction tasks.")
 	flags.BoolVar(&o.EnableClusterResourceModeling, "enable-cluster-resource-modeling", true, "Enable means controller would build resource modeling for each cluster by syncing Nodes and Pods resources.\n"+
@@ -209,5 +231,15 @@ func (o *Options) AddFlags(flags *pflag.FlagSet, allControllers, disabledByDefau
 
 	o.RateLimiterOpts.AddFlags(flags)
 	o.ProfileOpts.AddFlags(flags)
+	o.HPAControllerConfiguration.AddFlags(flags)
 	features.FeatureGate.AddFlag(flags)
+}
+
+// SkippedNamespacesRegexps precompiled regular expressions
+func (o *Options) SkippedNamespacesRegexps() []*regexp.Regexp {
+	skippedPropagatingNamespaces := make([]*regexp.Regexp, len(o.SkippedPropagatingNamespaces))
+	for index, ns := range o.SkippedPropagatingNamespaces {
+		skippedPropagatingNamespaces[index] = regexp.MustCompile(fmt.Sprintf("^%s$", ns))
+	}
+	return skippedPropagatingNamespaces
 }

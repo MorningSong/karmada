@@ -1,6 +1,23 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package util
 
 import (
+	"fmt"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -238,5 +255,104 @@ func TestDefaultSkippedResourceConfigGroupVersionKindParse(t *testing.T) {
 		if ok {
 			t.Error("unexpected error: v1")
 		}
+	}
+}
+
+func TestParseSingle(t *testing.T) {
+	tests := []struct {
+		input           string
+		expectedGroups  []string
+		expectedGroupVs []schema.GroupVersion
+		expectedGVKs    []schema.GroupVersionKind
+	}{
+		{
+			input:           "",
+			expectedGroups:  []string{},
+			expectedGroupVs: []schema.GroupVersion{},
+			expectedGVKs:    []schema.GroupVersionKind{},
+		},
+		{
+			input:           "apps",
+			expectedGroups:  []string{"apps"},
+			expectedGroupVs: []schema.GroupVersion{},
+			expectedGVKs:    []schema.GroupVersionKind{},
+		},
+		{
+			input:           "apps/v1",
+			expectedGroups:  []string{},
+			expectedGroupVs: []schema.GroupVersion{{Group: "apps", Version: "v1"}},
+			expectedGVKs:    []schema.GroupVersionKind{},
+		},
+		{
+			input:           "apps/v1beta1",
+			expectedGroups:  []string{},
+			expectedGroupVs: []schema.GroupVersion{{Group: "apps", Version: "v1beta1"}},
+			expectedGVKs:    []schema.GroupVersionKind{},
+		},
+		{
+			input:           "apps/v1/Deployment",
+			expectedGroups:  []string{},
+			expectedGroupVs: []schema.GroupVersion{},
+			expectedGVKs:    []schema.GroupVersionKind{{Group: "apps", Version: "v1", Kind: "Deployment"}},
+		},
+		{
+			input:           "apps/v1beta1/Deployment",
+			expectedGroups:  []string{},
+			expectedGroupVs: []schema.GroupVersion{},
+			expectedGVKs:    []schema.GroupVersionKind{{Group: "apps", Version: "v1beta1", Kind: "Deployment"}},
+		},
+		{
+			input:           "apps/v1/Deployment,ReplicaSet",
+			expectedGroups:  []string{},
+			expectedGroupVs: []schema.GroupVersion{},
+			expectedGVKs: []schema.GroupVersionKind{
+				{Group: "apps", Version: "v1", Kind: "Deployment"},
+				{Group: "apps", Version: "v1", Kind: "ReplicaSet"},
+			},
+		},
+		{
+			input:           "v1/Service",
+			expectedGroups:  []string{},
+			expectedGroupVs: []schema.GroupVersion{},
+			expectedGVKs:    []schema.GroupVersionKind{{Group: "", Version: "v1", Kind: "Service"}},
+		},
+		{
+			input:           "v1/Service,ConfigMap",
+			expectedGroups:  []string{},
+			expectedGroupVs: []schema.GroupVersion{},
+			expectedGVKs: []schema.GroupVersionKind{
+				{Group: "", Version: "v1", Kind: "Service"},
+				{Group: "", Version: "v1", Kind: "ConfigMap"},
+			},
+		},
+	}
+
+	for i, test := range tests {
+		t.Run(fmt.Sprintf("Test case %d", i+1), func(t *testing.T) {
+			// Create a new SkippedResourceConfig
+			r := NewSkippedResourceConfig()
+
+			// Call parseSingle with the input
+			if err := r.parseSingle(test.input); err != nil {
+				t.Error(err)
+			}
+
+			// Verify that skipping the correct groups, group versions, and GVKs are configured
+			for _, group := range test.expectedGroups {
+				if ok := r.GroupDisabled(group); !ok {
+					t.Errorf("Group %s was not found in the SkippedResourceConfig Groups", group)
+				}
+			}
+			for _, gv := range test.expectedGroupVs {
+				if ok := r.GroupVersionDisabled(gv); !ok {
+					t.Errorf("GroupVersion %v was not found in the SkippedResourceConfig GroupVersions", gv)
+				}
+			}
+			for _, gvk := range test.expectedGVKs {
+				if ok := r.GroupVersionKindDisabled(gvk); !ok {
+					t.Errorf("GVK %v was not found in the SkippedResourceConfig GroupVersionKinds", gvk)
+				}
+			}
+		})
 	}
 }

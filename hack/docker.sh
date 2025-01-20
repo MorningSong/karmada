@@ -1,4 +1,18 @@
 #!/usr/bin/env bash
+# Copyright 2021 The Karmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 
 set -o errexit
 set -o nounset
@@ -20,11 +34,13 @@ set -o pipefail
 #   REGISTRY          image registry
 #   VERSION           image version
 #   DOCKER_BUILD_ARGS additional arguments to the docker build command
+#   SIGN_IMAGE        enabled sign image with cosign, disabled by default.
 # Examples:
 #   hack/docker.sh karmada-aggregated-apiserver
 #   BUILD_PLATFORMS=linux/amd64 hack/docker.sh karmada-aggregated-apiserver
 #   OUTPUT_TYPE=registry BUILD_PLATFORMS=linux/amd64,linux/arm64 hack/docker.sh karmada-aggregated-apiserver
 #   DOCKER_BUILD_ARGS="--build-arg https_proxy=${https_proxy}" hack/docker.sh karmada-aggregated-apiserver"
+#   SIGN_IMAGE="1"
 
 REPO_ROOT=$(dirname "${BASH_SOURCE[0]}")/..
 source "${REPO_ROOT}/hack/util.sh"
@@ -32,6 +48,7 @@ source "${REPO_ROOT}/hack/util.sh"
 REGISTRY=${REGISTRY:-"docker.io/karmada"}
 VERSION=${VERSION:="unknown"}
 DOCKER_BUILD_ARGS=${DOCKER_BUILD_ARGS:-}
+SIGN_IMAGE=${SIGN_IMAGE:-"0"}
 
 function build_images() {
   local -r target=$1
@@ -66,6 +83,7 @@ function build_local_image() {
 
   if [[ "$output_type" == "registry" ]]; then
     docker push "${image_name}"
+    signImage ${image_name}
   fi
 }
 
@@ -85,7 +103,16 @@ function build_cross_image() {
           --tag "${image_name}" \
           --file "${REPO_ROOT}/cluster/images/buildx.Dockerfile" \
           "${REPO_ROOT}/_output/bin"
+  signImage ${image_name}
   set +x
+}
+
+function signImage(){
+  if [ $SIGN_IMAGE = "1" ];then
+    local -r target=$1
+    echo "Signing image: "${target}
+    cosign sign --yes ${target}
+  fi
 }
 
 function isCross() {

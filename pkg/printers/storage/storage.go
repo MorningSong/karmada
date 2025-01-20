@@ -22,16 +22,26 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apiserver/pkg/registry/rest"
 
 	"github.com/karmada-io/karmada/pkg/printers"
 )
 
 // TableConvertor struct - converts objects to metav1.Table using printers.TableGenerator
 type TableConvertor struct {
+	defaultTableConvert rest.TableConvertor
 	printers.TableGenerator
 }
 
-// ConvertToTable method - converts objects to metav1.Table objects using TableGenerator
+// NewTableConvertor create TableConvertor struct with defaultTableConvert and TableGenerator
+func NewTableConvertor(defaultTableConvert rest.TableConvertor, tableGenerator printers.TableGenerator) rest.TableConvertor {
+	return &TableConvertor{
+		defaultTableConvert: defaultTableConvert,
+		TableGenerator:      tableGenerator,
+	}
+}
+
+// ConvertToTable method - converts objects to metav1.Table objects using TableGenerator and defaultTableConvert
 func (c TableConvertor) ConvertToTable(ctx context.Context, obj runtime.Object, tableOptions runtime.Object) (*metav1.Table, error) {
 	noHeaders := false
 	if tableOptions != nil {
@@ -44,5 +54,12 @@ func (c TableConvertor) ConvertToTable(ctx context.Context, obj runtime.Object, 
 			return nil, fmt.Errorf("unrecognized type %T for table options, can't display tabular output", tableOptions)
 		}
 	}
-	return c.TableGenerator.GenerateTable(obj, printers.GenerateOptions{Wide: true, NoHeaders: noHeaders})
+	tableResult, err := c.TableGenerator.GenerateTable(obj, printers.GenerateOptions{Wide: true, NoHeaders: noHeaders})
+	if err == nil {
+		return tableResult, err
+	}
+	if c.defaultTableConvert == nil {
+		return tableResult, err
+	}
+	return c.defaultTableConvert.ConvertToTable(ctx, obj, tableOptions)
 }

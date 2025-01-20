@@ -1,3 +1,19 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package framework
 
 import (
@@ -7,6 +23,7 @@ import (
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -26,7 +43,7 @@ func CreateClusterPropagationPolicy(client karmada.Interface, policy *policyv1al
 func RemoveClusterPropagationPolicy(client karmada.Interface, name string) {
 	ginkgo.By(fmt.Sprintf("Removing ClusterPropagationPolicy(%s)", name), func() {
 		err := client.PolicyV1alpha1().ClusterPropagationPolicies().Delete(context.TODO(), name, metav1.DeleteOptions{})
-		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		gomega.Expect(err == nil || apierrors.IsNotFound(err)).Should(gomega.BeTrue())
 	})
 }
 
@@ -37,6 +54,18 @@ func PatchClusterPropagationPolicy(client karmada.Interface, name string, patch 
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 
 		_, err = client.PolicyV1alpha1().ClusterPropagationPolicies().Patch(context.TODO(), name, patchType, patchBytes, metav1.PatchOptions{})
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	})
+}
+
+// UpdateClusterPropagationPolicyWithSpec update PropagationSpec with karmada client.
+func UpdateClusterPropagationPolicyWithSpec(client karmada.Interface, name string, policySpec policyv1alpha1.PropagationSpec) {
+	ginkgo.By(fmt.Sprintf("Updating ClusterPropagationPolicy(%s) spec", name), func() {
+		newPolicy, err := client.PolicyV1alpha1().ClusterPropagationPolicies().Get(context.TODO(), name, metav1.GetOptions{})
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+
+		newPolicy.Spec = policySpec
+		_, err = client.PolicyV1alpha1().ClusterPropagationPolicies().Update(context.TODO(), newPolicy, metav1.UpdateOptions{})
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 	})
 }

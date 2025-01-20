@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package runtime
 
 import (
@@ -5,7 +21,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/golang/mock/gomock"
+	"go.uber.org/mock/gomock"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	clusterv1alpha1 "github.com/karmada-io/karmada/pkg/apis/cluster/v1alpha1"
@@ -111,7 +127,7 @@ func Test_frameworkImpl_RunScorePlugins(t *testing.T) {
 		{
 			name: "Test score ok",
 			mockFunc: func(mockScorePlugin *frameworktesting.MockScorePlugin, mockScoreExtension *frameworktesting.MockScoreExtensions) {
-				mockScorePlugin.EXPECT().Score(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+				mockScorePlugin.EXPECT().Score(gomock.Any(), gomock.Any(), gomock.Any()).
 					Return(int64(60), framework.NewResult(framework.Success))
 				mockScorePlugin.EXPECT().ScoreExtensions().Times(2).Return(mockScoreExtension)
 				mockScorePlugin.EXPECT().Name().AnyTimes().Return("foo")
@@ -123,8 +139,8 @@ func Test_frameworkImpl_RunScorePlugins(t *testing.T) {
 		},
 		{
 			name: "Test score func error",
-			mockFunc: func(mockScorePlugin *frameworktesting.MockScorePlugin, mockScoreExtension *frameworktesting.MockScoreExtensions) {
-				mockScorePlugin.EXPECT().Score(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+			mockFunc: func(mockScorePlugin *frameworktesting.MockScorePlugin, _ *frameworktesting.MockScoreExtensions) {
+				mockScorePlugin.EXPECT().Score(gomock.Any(), gomock.Any(), gomock.Any()).
 					Return(int64(-1), framework.NewResult(framework.Error, "foo"))
 				mockScorePlugin.EXPECT().Name().AnyTimes().Return("foo")
 			},
@@ -133,7 +149,7 @@ func Test_frameworkImpl_RunScorePlugins(t *testing.T) {
 		{
 			name: "Test normalize score error",
 			mockFunc: func(mockScorePlugin *frameworktesting.MockScorePlugin, mockScoreExtension *frameworktesting.MockScoreExtensions) {
-				mockScorePlugin.EXPECT().Score(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+				mockScorePlugin.EXPECT().Score(gomock.Any(), gomock.Any(), gomock.Any()).
 					Return(int64(60), framework.NewResult(framework.Success))
 				mockScorePlugin.EXPECT().ScoreExtensions().Times(2).Return(mockScoreExtension)
 				mockScorePlugin.EXPECT().Name().AnyTimes().Return("foo")
@@ -160,7 +176,7 @@ func Test_frameworkImpl_RunScorePlugins(t *testing.T) {
 			}
 
 			tt.mockFunc(mockScorePlugin, mockScoreExtension)
-			_, result := frameWork.RunScorePlugins(ctx, nil, nil, clusters)
+			_, result := frameWork.RunScorePlugins(ctx, nil, clusters)
 			if result.IsSuccess() != tt.isSuccess {
 				t.Errorf("want %v, but get:%v", tt.isSuccess, result.IsSuccess())
 			}

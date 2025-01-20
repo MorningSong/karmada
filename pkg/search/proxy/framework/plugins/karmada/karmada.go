@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package karmada
 
 import (
@@ -55,7 +71,7 @@ func (p *Karmada) Order() int {
 }
 
 // SupportRequest implements Plugin
-func (p *Karmada) SupportRequest(request framework.ProxyRequest) bool {
+func (p *Karmada) SupportRequest(_ framework.ProxyRequest) bool {
 	// This plugin's order is the last one. It's actually a fallback plugin.
 	// So we return true here to indicate we always support the request.
 	return true

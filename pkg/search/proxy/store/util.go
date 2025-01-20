@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package store
 
 import (
@@ -7,7 +23,9 @@ import (
 	"sync"
 
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/watch"
 
 	clusterv1alpha1 "github.com/karmada-io/karmada/pkg/apis/cluster/v1alpha1"
@@ -58,6 +76,17 @@ func (m *multiClusterResourceVersion) get(cluster string) string {
 		return "0"
 	}
 	return m.rvs[cluster]
+}
+
+func (m *multiClusterResourceVersion) clone() *multiClusterResourceVersion {
+	ret := &multiClusterResourceVersion{
+		isZero: m.isZero,
+		rvs:    make(map[string]string, len(m.rvs)),
+	}
+	for k, v := range m.rvs {
+		ret.rvs[k] = v
+	}
+	return ret
 }
 
 func (m *multiClusterResourceVersion) String() string {
@@ -125,6 +154,7 @@ func marshalRvs(rvs map[string]string) []byte {
 }
 
 type multiClusterContinue struct {
+	RV       string `json:"rv"`
 	Cluster  string `json:"cluster,omitempty"`
 	Continue string `json:"continue,omitempty"`
 }
@@ -181,9 +211,21 @@ func (w *watchMux) AddSource(watcher watch.Interface, decorator func(watch.Event
 
 // Start run the watcher
 func (w *watchMux) Start() {
-	for _, source := range w.sources {
-		go w.startWatchSource(source.watcher, source.decorator)
+	wg := sync.WaitGroup{}
+	for i := range w.sources {
+		source := w.sources[i]
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w.startWatchSource(source.watcher, source.decorator)
+		}()
 	}
+
+	go func() {
+		// close result chan after all goroutines exit, avoiding data race.
+		defer close(w.result)
+		wg.Wait()
+	}()
 }
 
 // ResultChan implements watch.Interface
@@ -206,7 +248,6 @@ func (w *watchMux) Stop() {
 	case <-w.done:
 	default:
 		close(w.done)
-		close(w.result)
 	}
 }
 
@@ -214,15 +255,16 @@ func (w *watchMux) startWatchSource(source watch.Interface, decorator func(watch
 	defer source.Stop()
 	defer w.Stop()
 	for {
-		var event watch.Event
-		var ok bool
+		var copyEvent watch.Event
 		select {
-		case event, ok = <-source.ResultChan():
+		case sourceEvent, ok := <-source.ResultChan():
 			if !ok {
 				return
 			}
+			// sourceEvent object is cacheObject,all watcher use the same point,must deepcopy.
+			copyEvent = *sourceEvent.DeepCopy()
 			if decorator != nil {
-				decorator(event)
+				decorator(copyEvent)
 			}
 		case <-w.done:
 			return
@@ -231,20 +273,63 @@ func (w *watchMux) startWatchSource(source watch.Interface, decorator func(watch
 		select {
 		case <-w.done:
 			return
-		default:
+		case w.result <- copyEvent:
 		}
-
-		func() {
-			w.lock.RLock()
-			defer w.lock.RUnlock()
-			select {
-			case <-w.done:
-				return
-			default:
-				w.result <- event
-			}
-		}()
 	}
+}
+
+// MultiNamespace contains multiple namespaces.
+type MultiNamespace struct {
+	allNamespaces bool
+	namespaces    sets.Set[string]
+}
+
+// NewMultiNamespace return a new empty MultiNamespace.
+func NewMultiNamespace() *MultiNamespace {
+	return &MultiNamespace{
+		namespaces: sets.New[string](),
+	}
+}
+
+// Add adds ns.
+func (n *MultiNamespace) Add(ns string) {
+	if n.allNamespaces || n.namespaces.Has(ns) {
+		return
+	}
+
+	if ns == metav1.NamespaceAll {
+		n.allNamespaces = true
+		n.namespaces = nil
+		return
+	}
+	n.namespaces.Insert(ns)
+}
+
+// Contains returns if ns is covered by MultiNamespace. NamespaceAll covers all.
+func (n *MultiNamespace) Contains(ns string) bool {
+	return n.allNamespaces || n.namespaces.Has(ns)
+}
+
+// Single returns ns name and true when only one namespace in MultiNamespace. NamespaceAll returns false.
+func (n *MultiNamespace) Single() (string, bool) {
+	if n.allNamespaces || n.namespaces.Len() != 1 {
+		return "", false
+	}
+
+	// reach here means there is exactly one namespace, so we can safely get it.
+	ns := sets.List(n.namespaces)[0]
+	return ns, true
+}
+
+// Equal tell whether two MultiNamespace has the same namespaces.
+func (n *MultiNamespace) Equal(another *MultiNamespace) bool {
+	if n.allNamespaces != another.allNamespaces {
+		return false
+	}
+	if n.allNamespaces {
+		return true
+	}
+	return n.namespaces.Equal(another.namespaces)
 }
 
 func addCacheSourceAnnotation(obj runtime.Object, clusterName string) {

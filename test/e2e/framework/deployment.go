@@ -1,3 +1,19 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package framework
 
 import (
@@ -43,21 +59,6 @@ func UpdateDeploymentPaused(client kubernetes.Interface, deployment *appsv1.Depl
 	})
 }
 
-// UpdateDeploymentStatus updates the Deployment status.
-func UpdateDeploymentStatus(client kubernetes.Interface, deployment *appsv1.Deployment) {
-	ginkgo.By(fmt.Sprintf("Update Deployment(%s/%s) status", deployment.Namespace, deployment.Name), func() {
-		gomega.Eventually(func() error {
-			deploy, err := client.AppsV1().Deployments(deployment.Namespace).Get(context.TODO(), deployment.Name, metav1.GetOptions{})
-			if err != nil {
-				return err
-			}
-			deploy.Status = deployment.Status
-			_, err = client.AppsV1().Deployments(deploy.Namespace).UpdateStatus(context.TODO(), deploy, metav1.UpdateOptions{})
-			return err
-		}, pollTimeout, pollInterval).ShouldNot(gomega.HaveOccurred())
-	})
-}
-
 // RemoveDeployment delete Deployment.
 func RemoveDeployment(client kubernetes.Interface, namespace, name string) {
 	ginkgo.By(fmt.Sprintf("Removing Deployment(%s/%s)", namespace, name), func() {
@@ -81,6 +82,17 @@ func WaitDeploymentPresentOnClusterFitWith(cluster, namespace, name string, fit 
 	}, pollTimeout, pollInterval).Should(gomega.Equal(true))
 }
 
+// WaitDeploymentFitWith wait deployment sync with fit func.
+func WaitDeploymentFitWith(client kubernetes.Interface, namespace, name string, fit func(deployment *appsv1.Deployment) bool) {
+	gomega.Eventually(func() bool {
+		dep, err := client.AppsV1().Deployments(namespace).Get(context.TODO(), name, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		return fit(dep)
+	}, pollTimeout, pollInterval).Should(gomega.Equal(true))
+}
+
 // WaitDeploymentPresentOnClustersFitWith wait deployment present on cluster sync with fit func.
 func WaitDeploymentPresentOnClustersFitWith(clusters []string, namespace, name string, fit func(deployment *appsv1.Deployment) bool) {
 	ginkgo.By(fmt.Sprintf("Waiting for deployment(%s/%s) synced on member clusters", namespace, name), func() {
@@ -90,12 +102,25 @@ func WaitDeploymentPresentOnClustersFitWith(clusters []string, namespace, name s
 	})
 }
 
+// WaitDeploymentStatus wait the deployment on the cluster to have the specified replicas
+func WaitDeploymentStatus(client kubernetes.Interface, deployment *appsv1.Deployment, replicas int32) {
+	ginkgo.By(fmt.Sprintf("Waiting for deployment(%s/%s) status to have %d replicas", deployment.Namespace, deployment.Name, replicas), func() {
+		gomega.Eventually(func() bool {
+			deploy, err := client.AppsV1().Deployments(deployment.Namespace).Get(context.TODO(), deployment.Name, metav1.GetOptions{})
+			if err != nil {
+				return false
+			}
+			return CheckDeploymentReadyStatus(deploy, replicas)
+		}, pollTimeout, pollInterval).Should(gomega.Equal(true))
+	})
+}
+
 // WaitDeploymentDisappearOnCluster wait deployment disappear on cluster until timeout.
 func WaitDeploymentDisappearOnCluster(cluster, namespace, name string) {
 	clusterClient := GetClusterClient(cluster)
 	gomega.Expect(clusterClient).ShouldNot(gomega.BeNil())
 
-	klog.Infof("Waiting for deployment(%s/%s) disappear on cluster(%s)", namespace, name, cluster)
+	klog.Infof("Waiting for deployment(%s/%s) disappears on cluster(%s)", namespace, name, cluster)
 	gomega.Eventually(func() bool {
 		_, err := clusterClient.AppsV1().Deployments(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 		if err == nil {
@@ -112,7 +137,7 @@ func WaitDeploymentDisappearOnCluster(cluster, namespace, name string) {
 
 // WaitDeploymentDisappearOnClusters wait deployment disappear on member clusters until timeout.
 func WaitDeploymentDisappearOnClusters(clusters []string, namespace, name string) {
-	ginkgo.By(fmt.Sprintf("Check if deployment(%s/%s) diappeare on member clusters", namespace, name), func() {
+	ginkgo.By(fmt.Sprintf("Check if deployment(%s/%s) disappears on member clusters", namespace, name), func() {
 		for _, clusterName := range clusters {
 			WaitDeploymentDisappearOnCluster(clusterName, namespace, name)
 		}
@@ -149,7 +174,42 @@ func UpdateDeploymentAnnotations(client kubernetes.Interface, deployment *appsv1
 	})
 }
 
-// UpdateDeploymentVolumes update Deployment's volumes.
+// AppendDeploymentAnnotations append deployment's annotations.
+func AppendDeploymentAnnotations(client kubernetes.Interface, deployment *appsv1.Deployment, annotations map[string]string) {
+	ginkgo.By(fmt.Sprintf("Appending Deployment(%s/%s)'s annotations to %v", deployment.Namespace, deployment.Name, annotations), func() {
+		gomega.Eventually(func() error {
+			deploy, err := client.AppsV1().Deployments(deployment.Namespace).Get(context.TODO(), deployment.Name, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			if deploy.Annotations == nil {
+				deploy.Annotations = make(map[string]string, 0)
+			}
+			for k, v := range annotations {
+				deploy.Annotations[k] = v
+			}
+			_, err = client.AppsV1().Deployments(deploy.Namespace).Update(context.TODO(), deploy, metav1.UpdateOptions{})
+			return err
+		}, pollTimeout, pollInterval).ShouldNot(gomega.HaveOccurred())
+	})
+}
+
+// UpdateDeploymentLabels update deployment's labels.
+func UpdateDeploymentLabels(client kubernetes.Interface, deployment *appsv1.Deployment, labels map[string]string) {
+	ginkgo.By(fmt.Sprintf("Updating Deployment(%s/%s)'s labels to %v", deployment.Namespace, deployment.Name, labels), func() {
+		gomega.Eventually(func() error {
+			deploy, err := client.AppsV1().Deployments(deployment.Namespace).Get(context.TODO(), deployment.Name, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			deploy.Labels = labels
+			_, err = client.AppsV1().Deployments(deploy.Namespace).Update(context.TODO(), deploy, metav1.UpdateOptions{})
+			return err
+		}, pollTimeout, pollInterval).ShouldNot(gomega.HaveOccurred())
+	})
+}
+
+// UpdateDeploymentVolumes update deployment's volumes.
 func UpdateDeploymentVolumes(client kubernetes.Interface, deployment *appsv1.Deployment, volumes []corev1.Volume) {
 	ginkgo.By(fmt.Sprintf("Updating Deployment(%s/%s)'s volumes", deployment.Namespace, deployment.Name), func() {
 		gomega.Eventually(func() error {
@@ -164,7 +224,7 @@ func UpdateDeploymentVolumes(client kubernetes.Interface, deployment *appsv1.Dep
 	})
 }
 
-// UpdateDeploymentServiceAccountName update Deployment's serviceAccountName.
+// UpdateDeploymentServiceAccountName update deployment's serviceAccountName.
 func UpdateDeploymentServiceAccountName(client kubernetes.Interface, deployment *appsv1.Deployment, serviceAccountName string) {
 	ginkgo.By(fmt.Sprintf("Updating Deployment(%s/%s)'s serviceAccountName", deployment.Namespace, deployment.Name), func() {
 		gomega.Eventually(func() error {
@@ -222,6 +282,29 @@ func WaitDeploymentGetByClientFitWith(client kubernetes.Interface, namespace, na
 				return false
 			}
 			return fit(dep)
+		}, pollTimeout, pollInterval).Should(gomega.Equal(true))
+	})
+}
+
+// WaitDeploymentReplicasFitWith wait deployment replicas get by client fit with expected replicas.
+func WaitDeploymentReplicasFitWith(clusters []string, namespace, name string, expectReplicas int) {
+	ginkgo.By(fmt.Sprintf("Check deployment(%s/%s) replicas fit with expecting", namespace, name), func() {
+		gomega.Eventually(func() bool {
+			totalReplicas := 0
+			for _, cluster := range clusters {
+				clusterClient := GetClusterClient(cluster)
+				if clusterClient == nil {
+					continue
+				}
+
+				dep, err := clusterClient.AppsV1().Deployments(namespace).Get(context.TODO(), name, metav1.GetOptions{})
+				if err != nil {
+					continue
+				}
+				totalReplicas += int(*dep.Spec.Replicas)
+			}
+			klog.Infof("The total replicas of deployment(%s/%s) is %d", namespace, name, totalReplicas)
+			return totalReplicas == expectReplicas
 		}, pollTimeout, pollInterval).Should(gomega.Equal(true))
 	})
 }

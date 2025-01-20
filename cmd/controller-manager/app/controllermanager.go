@@ -1,10 +1,24 @@
+/*
+Copyright 2020 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package app
 
 import (
 	"context"
 	"flag"
-	"net"
-	"strconv"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -12,16 +26,22 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/informers"
 	kubeclientset "k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/term"
 	"k8s.io/klog/v2"
+	resourceclient "k8s.io/metrics/pkg/client/clientset/versioned/typed/metrics/v1beta1"
+	"k8s.io/metrics/pkg/client/custom_metrics"
+	"k8s.io/metrics/pkg/client/external_metrics"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
-	"sigs.k8s.io/controller-runtime/pkg/config/v1alpha1"
+	"sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	crtlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	"github.com/karmada-io/karmada/cmd/controller-manager/app/options"
@@ -29,17 +49,26 @@ import (
 	workv1alpha1 "github.com/karmada-io/karmada/pkg/apis/work/v1alpha1"
 	workv1alpha2 "github.com/karmada-io/karmada/pkg/apis/work/v1alpha2"
 	"github.com/karmada-io/karmada/pkg/clusterdiscovery/clusterapi"
+	"github.com/karmada-io/karmada/pkg/controllers/applicationfailover"
 	"github.com/karmada-io/karmada/pkg/controllers/binding"
+	"github.com/karmada-io/karmada/pkg/controllers/certificate/approver"
 	"github.com/karmada-io/karmada/pkg/controllers/cluster"
 	controllerscontext "github.com/karmada-io/karmada/pkg/controllers/context"
+	"github.com/karmada-io/karmada/pkg/controllers/cronfederatedhpa"
+	"github.com/karmada-io/karmada/pkg/controllers/deploymentreplicassyncer"
 	"github.com/karmada-io/karmada/pkg/controllers/execution"
+	"github.com/karmada-io/karmada/pkg/controllers/federatedhpa"
+	metricsclient "github.com/karmada-io/karmada/pkg/controllers/federatedhpa/metrics"
 	"github.com/karmada-io/karmada/pkg/controllers/federatedresourcequota"
 	"github.com/karmada-io/karmada/pkg/controllers/gracefuleviction"
-	"github.com/karmada-io/karmada/pkg/controllers/hpa"
+	"github.com/karmada-io/karmada/pkg/controllers/hpascaletargetmarker"
 	"github.com/karmada-io/karmada/pkg/controllers/mcs"
+	"github.com/karmada-io/karmada/pkg/controllers/multiclusterservice"
 	"github.com/karmada-io/karmada/pkg/controllers/namespace"
+	"github.com/karmada-io/karmada/pkg/controllers/remediation"
 	"github.com/karmada-io/karmada/pkg/controllers/status"
 	"github.com/karmada-io/karmada/pkg/controllers/unifiedauth"
+	"github.com/karmada-io/karmada/pkg/controllers/workloadrebalancer"
 	"github.com/karmada-io/karmada/pkg/dependenciesdistributor"
 	"github.com/karmada-io/karmada/pkg/detector"
 	"github.com/karmada-io/karmada/pkg/features"
@@ -55,6 +84,7 @@ import (
 	"github.com/karmada-io/karmada/pkg/util/fedinformer/typedmanager"
 	"github.com/karmada-io/karmada/pkg/util/gclient"
 	"github.com/karmada-io/karmada/pkg/util/helper"
+	"github.com/karmada-io/karmada/pkg/util/names"
 	"github.com/karmada-io/karmada/pkg/util/objectwatcher"
 	"github.com/karmada-io/karmada/pkg/util/overridemanager"
 	"github.com/karmada-io/karmada/pkg/util/restmapper"
@@ -67,11 +97,11 @@ func NewControllerManagerCommand(ctx context.Context) *cobra.Command {
 	opts := options.NewOptions()
 
 	cmd := &cobra.Command{
-		Use: "karmada-controller-manager",
+		Use: names.KarmadaControllerManagerComponentName,
 		Long: `The karmada-controller-manager runs various controllers.
-The controllers watch Karmada objects and then talk to the underlying clusters' API servers 
+The controllers watch Karmada objects and then talk to the underlying clusters' API servers
 to create regular Kubernetes resources.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			// validate options
 			if errs := opts.Validate(); len(errs) != 0 {
 				return errs.ToAggregate()
@@ -95,7 +125,7 @@ to create regular Kubernetes resources.`,
 	logsFlagSet := fss.FlagSet("logs")
 	klogflag.Add(logsFlagSet)
 
-	cmd.AddCommand(sharedcommand.NewCmdVersion("karmada-controller-manager"))
+	cmd.AddCommand(sharedcommand.NewCmdVersion(names.KarmadaControllerManagerComponentName))
 	cmd.Flags().AddFlagSet(genericFlagSet)
 	cmd.Flags().AddFlagSet(logsFlagSet)
 
@@ -110,15 +140,15 @@ func Run(ctx context.Context, opts *options.Options) error {
 
 	profileflag.ListenAndServe(opts.ProfileOpts)
 
-	config, err := controllerruntime.GetConfig()
+	controlPlaneRestConfig, err := controllerruntime.GetConfig()
 	if err != nil {
 		panic(err)
 	}
-	config.QPS, config.Burst = opts.KubeAPIQPS, opts.KubeAPIBurst
-	controllerManager, err := controllerruntime.NewManager(config, controllerruntime.Options{
+	controlPlaneRestConfig.QPS, controlPlaneRestConfig.Burst = opts.KubeAPIQPS, opts.KubeAPIBurst
+	controllerManager, err := controllerruntime.NewManager(controlPlaneRestConfig, controllerruntime.Options{
 		Logger:                     klog.Background(),
 		Scheme:                     gclient.NewSchema(),
-		SyncPeriod:                 &opts.ResyncPeriod.Duration,
+		Cache:                      cache.Options{SyncPeriod: &opts.ResyncPeriod.Duration},
 		LeaderElection:             opts.LeaderElection.LeaderElect,
 		LeaderElectionID:           opts.LeaderElection.ResourceName,
 		LeaderElectionNamespace:    opts.LeaderElection.ResourceNamespace,
@@ -126,14 +156,14 @@ func Run(ctx context.Context, opts *options.Options) error {
 		RenewDeadline:              &opts.LeaderElection.RenewDeadline.Duration,
 		RetryPeriod:                &opts.LeaderElection.RetryPeriod.Duration,
 		LeaderElectionResourceLock: opts.LeaderElection.ResourceLock,
-		HealthProbeBindAddress:     net.JoinHostPort(opts.BindAddress, strconv.Itoa(opts.SecurePort)),
+		HealthProbeBindAddress:     opts.HealthProbeBindAddress,
 		LivenessEndpointName:       "/healthz",
-		MetricsBindAddress:         opts.MetricsBindAddress,
+		Metrics:                    metricsserver.Options{BindAddress: opts.MetricsBindAddress},
 		MapperProvider:             restmapper.MapperProvider,
 		BaseContext: func() context.Context {
 			return ctx
 		},
-		Controller: v1alpha1.ControllerConfigurationSpec{
+		Controller: config.Controller{
 			GroupKindConcurrency: map[string]int{
 				workv1alpha1.SchemeGroupVersion.WithKind("Work").GroupKind().String():                     opts.ConcurrentWorkSyncs,
 				workv1alpha2.SchemeGroupVersion.WithKind("ResourceBinding").GroupKind().String():          opts.ConcurrentResourceBindingSyncs,
@@ -141,10 +171,12 @@ func Run(ctx context.Context, opts *options.Options) error {
 				clusterv1alpha1.SchemeGroupVersion.WithKind("Cluster").GroupKind().String():               opts.ConcurrentClusterSyncs,
 				schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Namespace"}.GroupKind().String(): opts.ConcurrentNamespaceSyncs,
 			},
+			CacheSyncTimeout: opts.ClusterCacheSyncTimeout.Duration,
 		},
-		NewCache: cache.BuilderWithOptions(cache.Options{
-			DefaultTransform: fedinformer.StripUnusedFields,
-		}),
+		NewCache: func(config *rest.Config, opts cache.Options) (cache.Cache, error) {
+			opts.DefaultTransform = fedinformer.StripUnusedFields
+			return cache.New(config, opts)
+		},
 	})
 	if err != nil {
 		klog.Errorf("Failed to build controller manager: %v", err)
@@ -159,6 +191,10 @@ func Run(ctx context.Context, opts *options.Options) error {
 	crtlmetrics.Registry.MustRegister(metrics.ClusterCollectors()...)
 	crtlmetrics.Registry.MustRegister(metrics.ResourceCollectors()...)
 	crtlmetrics.Registry.MustRegister(metrics.PoolCollectors()...)
+
+	if err := helper.IndexWork(ctx, controllerManager); err != nil {
+		klog.Fatalf("Failed to index Work: %v", err)
+	}
 
 	setupControllers(controllerManager, opts, ctx.Done())
 
@@ -175,15 +211,13 @@ func Run(ctx context.Context, opts *options.Options) error {
 var controllers = make(controllerscontext.Initializers)
 
 // controllersDisabledByDefault is the set of controllers which is disabled by default
-var controllersDisabledByDefault = sets.New(
-	"hpa",
-)
+var controllersDisabledByDefault = sets.New("hpaScaleTargetMarker", "deploymentReplicasSyncer")
 
 func init() {
 	controllers["cluster"] = startClusterController
 	controllers["clusterStatus"] = startClusterStatusController
-	controllers["hpa"] = startHpaController
 	controllers["binding"] = startBindingController
+	controllers["bindingStatus"] = startBindingStatusController
 	controllers["execution"] = startExecutionController
 	controllers["workStatus"] = startWorkStatusController
 	controllers["namespace"] = startNamespaceController
@@ -194,6 +228,17 @@ func init() {
 	controllers["federatedResourceQuotaSync"] = startFederatedResourceQuotaSyncController
 	controllers["federatedResourceQuotaStatus"] = startFederatedResourceQuotaStatusController
 	controllers["gracefulEviction"] = startGracefulEvictionController
+	controllers["applicationFailover"] = startApplicationFailoverController
+	controllers["federatedHorizontalPodAutoscaler"] = startFederatedHorizontalPodAutoscalerController
+	controllers["cronFederatedHorizontalPodAutoscaler"] = startCronFederatedHorizontalPodAutoscalerController
+	controllers["hpaScaleTargetMarker"] = startHPAScaleTargetMarkerController
+	controllers["deploymentReplicasSyncer"] = startDeploymentReplicasSyncerController
+	controllers["multiclusterservice"] = startMCSController
+	controllers["endpointsliceCollect"] = startEndpointSliceCollectController
+	controllers["endpointsliceDispatch"] = startEndpointSliceDispatchController
+	controllers["remedy"] = startRemedyController
+	controllers["workloadRebalancer"] = startWorkloadRebalancerController
+	controllers["agentcsrapproving"] = startAgentCSRApprovingController
 }
 
 func startClusterController(ctx controllerscontext.Context) (enabled bool, err error) {
@@ -209,6 +254,7 @@ func startClusterController(ctx controllerscontext.Context) (enabled bool, err e
 		FailoverEvictionTimeout:            opts.FailoverEvictionTimeout.Duration,
 		EnableTaintManager:                 ctx.Opts.EnableTaintManager,
 		ClusterTaintEvictionRetryFrequency: 10 * time.Second,
+		ExecutionSpaceRetryFrequency:       10 * time.Second,
 	}
 	if err := clusterController.SetupWithManager(mgr); err != nil {
 		return false, err
@@ -264,7 +310,7 @@ func startClusterStatusController(ctx controllerscontext.Context) (enabled bool,
 
 			return obj.Spec.SyncMode == clusterv1alpha1.Push
 		},
-		GenericFunc: func(genericEvent event.GenericEvent) bool {
+		GenericFunc: func(event.GenericEvent) bool {
 			return false
 		},
 	}
@@ -289,20 +335,6 @@ func startClusterStatusController(ctx controllerscontext.Context) (enabled bool,
 		EnableClusterResourceModeling:     ctx.Opts.EnableClusterResourceModeling,
 	}
 	if err := clusterStatusController.SetupWithManager(mgr); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-func startHpaController(ctx controllerscontext.Context) (enabled bool, err error) {
-	hpaController := &hpa.HorizontalPodAutoscalerController{
-		Client:          ctx.Mgr.GetClient(),
-		DynamicClient:   ctx.DynamicClientSet,
-		EventRecorder:   ctx.Mgr.GetEventRecorderFor(hpa.ControllerName),
-		RESTMapper:      ctx.Mgr.GetRESTMapper(),
-		InformerManager: ctx.ControlPlaneInformerManager,
-	}
-	if err := hpaController.SetupWithManager(ctx.Mgr); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -336,6 +368,36 @@ func startBindingController(ctx controllerscontext.Context) (enabled bool, err e
 	if err := clusterResourceBindingController.SetupWithManager(ctx.Mgr); err != nil {
 		return false, err
 	}
+	return true, nil
+}
+
+func startBindingStatusController(ctx controllerscontext.Context) (enabled bool, err error) {
+	rbStatusController := &status.RBStatusController{
+		Client:              ctx.Mgr.GetClient(),
+		DynamicClient:       ctx.DynamicClientSet,
+		InformerManager:     ctx.ControlPlaneInformerManager,
+		ResourceInterpreter: ctx.ResourceInterpreter,
+		EventRecorder:       ctx.Mgr.GetEventRecorderFor(status.RBStatusControllerName),
+		RESTMapper:          ctx.Mgr.GetRESTMapper(),
+		RateLimiterOptions:  ctx.Opts.RateLimiterOptions,
+	}
+	if err := rbStatusController.SetupWithManager(ctx.Mgr); err != nil {
+		return false, err
+	}
+
+	crbStatusController := &status.CRBStatusController{
+		Client:              ctx.Mgr.GetClient(),
+		DynamicClient:       ctx.DynamicClientSet,
+		InformerManager:     ctx.ControlPlaneInformerManager,
+		ResourceInterpreter: ctx.ResourceInterpreter,
+		EventRecorder:       ctx.Mgr.GetEventRecorderFor(status.CRBStatusControllerName),
+		RESTMapper:          ctx.Mgr.GetRESTMapper(),
+		RateLimiterOptions:  ctx.Opts.RateLimiterOptions,
+	}
+	if err := crbStatusController.SetupWithManager(ctx.Mgr); err != nil {
+		return false, err
+	}
+
 	return true, nil
 }
 
@@ -380,14 +442,10 @@ func startWorkStatusController(ctx controllerscontext.Context) (enabled bool, er
 }
 
 func startNamespaceController(ctx controllerscontext.Context) (enabled bool, err error) {
-	skippedPropagatingNamespaces := map[string]struct{}{}
-	for _, ns := range ctx.Opts.SkippedPropagatingNamespaces {
-		skippedPropagatingNamespaces[ns] = struct{}{}
-	}
 	namespaceSyncController := &namespace.Controller{
 		Client:                       ctx.Mgr.GetClient(),
 		EventRecorder:                ctx.Mgr.GetEventRecorderFor(namespace.ControllerName),
-		SkippedPropagatingNamespaces: skippedPropagatingNamespaces,
+		SkippedPropagatingNamespaces: ctx.Opts.SkippedPropagatingNamespaces,
 		OverrideManager:              ctx.OverrideManager,
 	}
 	if err := namespaceSyncController.SetupWithManager(ctx.Mgr); err != nil {
@@ -411,6 +469,44 @@ func startServiceExportController(ctx controllerscontext.Context) (enabled bool,
 	}
 	serviceExportController.RunWorkQueue()
 	if err := serviceExportController.SetupWithManager(ctx.Mgr); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func startEndpointSliceCollectController(ctx controllerscontext.Context) (enabled bool, err error) {
+	if !features.FeatureGate.Enabled(features.MultiClusterService) {
+		return false, nil
+	}
+	opts := ctx.Opts
+	endpointSliceCollectController := &multiclusterservice.EndpointSliceCollectController{
+		Client:                      ctx.Mgr.GetClient(),
+		RESTMapper:                  ctx.Mgr.GetRESTMapper(),
+		InformerManager:             genericmanager.GetInstance(),
+		StopChan:                    ctx.StopChan,
+		WorkerNumber:                3,
+		PredicateFunc:               helper.NewPredicateForEndpointSliceCollectController(ctx.Mgr),
+		ClusterDynamicClientSetFunc: util.NewClusterDynamicClientSet,
+		ClusterCacheSyncTimeout:     opts.ClusterCacheSyncTimeout,
+	}
+	endpointSliceCollectController.RunWorkQueue()
+	if err := endpointSliceCollectController.SetupWithManager(ctx.Mgr); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func startEndpointSliceDispatchController(ctx controllerscontext.Context) (enabled bool, err error) {
+	if !features.FeatureGate.Enabled(features.MultiClusterService) {
+		return false, nil
+	}
+	endpointSliceSyncController := &multiclusterservice.EndpointsliceDispatchController{
+		Client:          ctx.Mgr.GetClient(),
+		EventRecorder:   ctx.Mgr.GetEventRecorderFor(multiclusterservice.EndpointsliceDispatchControllerName),
+		RESTMapper:      ctx.Mgr.GetRESTMapper(),
+		InformerManager: genericmanager.GetInstance(),
+	}
+	if err := endpointSliceSyncController.SetupWithManager(ctx.Mgr); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -472,31 +568,165 @@ func startFederatedResourceQuotaStatusController(ctx controllerscontext.Context)
 }
 
 func startGracefulEvictionController(ctx controllerscontext.Context) (enabled bool, err error) {
-	if features.FeatureGate.Enabled(features.GracefulEviction) {
-		rbGracefulEvictionController := &gracefuleviction.RBGracefulEvictionController{
-			Client:                  ctx.Mgr.GetClient(),
-			EventRecorder:           ctx.Mgr.GetEventRecorderFor(gracefuleviction.RBGracefulEvictionControllerName),
-			RateLimiterOptions:      ctx.Opts.RateLimiterOptions,
-			GracefulEvictionTimeout: ctx.Opts.GracefulEvictionTimeout.Duration,
-		}
-		if err := rbGracefulEvictionController.SetupWithManager(ctx.Mgr); err != nil {
-			return false, err
-		}
-
-		crbGracefulEvictionController := &gracefuleviction.CRBGracefulEvictionController{
-			Client:                  ctx.Mgr.GetClient(),
-			EventRecorder:           ctx.Mgr.GetEventRecorderFor(gracefuleviction.CRBGracefulEvictionControllerName),
-			RateLimiterOptions:      ctx.Opts.RateLimiterOptions,
-			GracefulEvictionTimeout: ctx.Opts.GracefulEvictionTimeout.Duration,
-		}
-		if err := crbGracefulEvictionController.SetupWithManager(ctx.Mgr); err != nil {
-			return false, err
-		}
-
-		return true, nil
+	rbGracefulEvictionController := &gracefuleviction.RBGracefulEvictionController{
+		Client:                  ctx.Mgr.GetClient(),
+		EventRecorder:           ctx.Mgr.GetEventRecorderFor(gracefuleviction.RBGracefulEvictionControllerName),
+		RateLimiterOptions:      ctx.Opts.RateLimiterOptions,
+		GracefulEvictionTimeout: ctx.Opts.GracefulEvictionTimeout.Duration,
+	}
+	if err := rbGracefulEvictionController.SetupWithManager(ctx.Mgr); err != nil {
+		return false, err
 	}
 
-	return false, nil
+	crbGracefulEvictionController := &gracefuleviction.CRBGracefulEvictionController{
+		Client:                  ctx.Mgr.GetClient(),
+		EventRecorder:           ctx.Mgr.GetEventRecorderFor(gracefuleviction.CRBGracefulEvictionControllerName),
+		RateLimiterOptions:      ctx.Opts.RateLimiterOptions,
+		GracefulEvictionTimeout: ctx.Opts.GracefulEvictionTimeout.Duration,
+	}
+	if err := crbGracefulEvictionController.SetupWithManager(ctx.Mgr); err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
+func startApplicationFailoverController(ctx controllerscontext.Context) (enabled bool, err error) {
+	rbApplicationFailoverController := applicationfailover.RBApplicationFailoverController{
+		Client:              ctx.Mgr.GetClient(),
+		EventRecorder:       ctx.Mgr.GetEventRecorderFor(applicationfailover.RBApplicationFailoverControllerName),
+		ResourceInterpreter: ctx.ResourceInterpreter,
+	}
+	if err = rbApplicationFailoverController.SetupWithManager(ctx.Mgr); err != nil {
+		return false, err
+	}
+
+	crbApplicationFailoverController := applicationfailover.CRBApplicationFailoverController{
+		Client:              ctx.Mgr.GetClient(),
+		EventRecorder:       ctx.Mgr.GetEventRecorderFor(applicationfailover.CRBApplicationFailoverControllerName),
+		ResourceInterpreter: ctx.ResourceInterpreter,
+	}
+	if err = crbApplicationFailoverController.SetupWithManager(ctx.Mgr); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func startFederatedHorizontalPodAutoscalerController(ctx controllerscontext.Context) (enabled bool, err error) {
+	apiVersionsGetter := custom_metrics.NewAvailableAPIsGetter(ctx.KubeClientSet.Discovery())
+	go custom_metrics.PeriodicallyInvalidate(
+		apiVersionsGetter,
+		ctx.Opts.HPAControllerConfiguration.HorizontalPodAutoscalerSyncPeriod.Duration,
+		ctx.StopChan)
+	metricsClient := metricsclient.NewRESTMetricsClient(
+		resourceclient.NewForConfigOrDie(ctx.Mgr.GetConfig()),
+		custom_metrics.NewForConfig(ctx.Mgr.GetConfig(), ctx.Mgr.GetRESTMapper(), apiVersionsGetter),
+		external_metrics.NewForConfigOrDie(ctx.Mgr.GetConfig()),
+	)
+	replicaCalculator := federatedhpa.NewReplicaCalculator(metricsClient,
+		ctx.Opts.HPAControllerConfiguration.HorizontalPodAutoscalerTolerance,
+		ctx.Opts.HPAControllerConfiguration.HorizontalPodAutoscalerCPUInitializationPeriod.Duration,
+		ctx.Opts.HPAControllerConfiguration.HorizontalPodAutoscalerInitialReadinessDelay.Duration)
+	federatedHPAController := federatedhpa.FHPAController{
+		Client:                            ctx.Mgr.GetClient(),
+		EventRecorder:                     ctx.Mgr.GetEventRecorderFor(federatedhpa.ControllerName),
+		RESTMapper:                        ctx.Mgr.GetRESTMapper(),
+		DownscaleStabilisationWindow:      ctx.Opts.HPAControllerConfiguration.HorizontalPodAutoscalerDownscaleStabilizationWindow.Duration,
+		HorizontalPodAutoscalerSyncPeriod: ctx.Opts.HPAControllerConfiguration.HorizontalPodAutoscalerSyncPeriod.Duration,
+		ReplicaCalc:                       replicaCalculator,
+		ClusterScaleClientSetFunc:         util.NewClusterScaleClientSet,
+		TypedInformerManager:              typedmanager.GetInstance(),
+		RateLimiterOptions:                ctx.Opts.RateLimiterOptions,
+		ClusterCacheSyncTimeout:           ctx.Opts.ClusterCacheSyncTimeout,
+	}
+	if err = federatedHPAController.SetupWithManager(ctx.Mgr); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func startCronFederatedHorizontalPodAutoscalerController(ctx controllerscontext.Context) (enabled bool, err error) {
+	cronFHPAController := cronfederatedhpa.CronFHPAController{
+		Client:             ctx.Mgr.GetClient(),
+		EventRecorder:      ctx.Mgr.GetEventRecorderFor(cronfederatedhpa.ControllerName),
+		RateLimiterOptions: ctx.Opts.RateLimiterOptions,
+	}
+	if err = cronFHPAController.SetupWithManager(ctx.Mgr); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func startHPAScaleTargetMarkerController(ctx controllerscontext.Context) (enabled bool, err error) {
+	hpaScaleTargetMarker := hpascaletargetmarker.HpaScaleTargetMarker{
+		DynamicClient: ctx.DynamicClientSet,
+		RESTMapper:    ctx.Mgr.GetRESTMapper(),
+	}
+	err = hpaScaleTargetMarker.SetupWithManager(ctx.Mgr)
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
+func startDeploymentReplicasSyncerController(ctx controllerscontext.Context) (enabled bool, err error) {
+	deploymentReplicasSyncer := deploymentreplicassyncer.DeploymentReplicasSyncer{
+		Client: ctx.Mgr.GetClient(),
+	}
+	err = deploymentReplicasSyncer.SetupWithManager(ctx.Mgr)
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
+func startMCSController(ctx controllerscontext.Context) (enabled bool, err error) {
+	if !features.FeatureGate.Enabled(features.MultiClusterService) {
+		return false, nil
+	}
+	mcsController := &multiclusterservice.MCSController{
+		Client:             ctx.Mgr.GetClient(),
+		EventRecorder:      ctx.Mgr.GetEventRecorderFor(multiclusterservice.ControllerName),
+		RateLimiterOptions: ctx.Opts.RateLimiterOptions,
+	}
+	if err = mcsController.SetupWithManager(ctx.Mgr); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func startRemedyController(ctx controllerscontext.Context) (enabled bool, err error) {
+	c := &remediation.RemedyController{
+		Client:           ctx.Mgr.GetClient(),
+		RateLimitOptions: ctx.Opts.RateLimiterOptions,
+	}
+	if err = c.SetupWithManager(ctx.Mgr); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func startWorkloadRebalancerController(ctx controllerscontext.Context) (enabled bool, err error) {
+	workloadRebalancer := workloadrebalancer.RebalancerController{
+		Client: ctx.Mgr.GetClient(),
+	}
+	err = workloadRebalancer.SetupWithManager(ctx.Mgr)
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
+func startAgentCSRApprovingController(ctx controllerscontext.Context) (enabled bool, err error) {
+	agentCSRApprover := approver.AgentCSRApprovingController{Client: ctx.KubeClientSet}
+	err = agentCSRApprover.SetupWithManager(ctx.Mgr)
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // setupControllers initialize controllers and setup one by one.
@@ -504,6 +734,7 @@ func setupControllers(mgr controllerruntime.Manager, opts *options.Options, stop
 	restConfig := mgr.GetConfig()
 	dynamicClientSet := dynamic.NewForConfigOrDie(restConfig)
 	discoverClientSet := discovery.NewDiscoveryClientForConfigOrDie(restConfig)
+	kubeClientSet := kubeclientset.NewForConfigOrDie(restConfig)
 
 	overrideManager := overridemanager.New(mgr.GetClient(), mgr.GetEventRecorderFor(overridemanager.OverrideManagerName))
 	skippedResourceConfig := util.NewSkippedResourceConfig()
@@ -512,14 +743,15 @@ func setupControllers(mgr controllerruntime.Manager, opts *options.Options, stop
 		return
 	}
 
-	skippedPropagatingNamespaces := map[string]struct{}{}
-	for _, ns := range opts.SkippedPropagatingNamespaces {
-		skippedPropagatingNamespaces[ns] = struct{}{}
-	}
+	controlPlaneInformerManager := genericmanager.NewSingleClusterInformerManager(dynamicClientSet, opts.ResyncPeriod.Duration, stopChan)
+	// We need a service lister to build a resource interpreter with `ClusterIPServiceResolver`
+	// witch allows connection to the customized interpreter webhook without a cluster DNS service.
+	sharedFactory := informers.NewSharedInformerFactory(kubeClientSet, opts.ResyncPeriod.Duration)
+	serviceLister := sharedFactory.Core().V1().Services().Lister()
+	sharedFactory.Start(stopChan)
+	sharedFactory.WaitForCacheSync(stopChan)
 
-	controlPlaneInformerManager := genericmanager.NewSingleClusterInformerManager(dynamicClientSet, 0, stopChan)
-
-	resourceInterpreter := resourceinterpreter.NewResourceInterpreter(controlPlaneInformerManager)
+	resourceInterpreter := resourceinterpreter.NewResourceInterpreter(controlPlaneInformerManager, serviceLister)
 	if err := mgr.Add(resourceInterpreter); err != nil {
 		klog.Fatalf("Failed to setup custom resource interpreter: %v", err)
 	}
@@ -527,36 +759,39 @@ func setupControllers(mgr controllerruntime.Manager, opts *options.Options, stop
 	objectWatcher := objectwatcher.NewObjectWatcher(mgr.GetClient(), mgr.GetRESTMapper(), util.NewClusterDynamicClientSet, resourceInterpreter)
 
 	resourceDetector := &detector.ResourceDetector{
-		DiscoveryClientSet:              discoverClientSet,
-		Client:                          mgr.GetClient(),
-		InformerManager:                 controlPlaneInformerManager,
-		RESTMapper:                      mgr.GetRESTMapper(),
-		DynamicClient:                   dynamicClientSet,
-		SkippedResourceConfig:           skippedResourceConfig,
-		SkippedPropagatingNamespaces:    skippedPropagatingNamespaces,
-		ResourceInterpreter:             resourceInterpreter,
-		EventRecorder:                   mgr.GetEventRecorderFor("resource-detector"),
-		ConcurrentResourceTemplateSyncs: opts.ConcurrentResourceTemplateSyncs,
-		RateLimiterOptions:              opts.RateLimiterOpts,
+		DiscoveryClientSet:                      discoverClientSet,
+		Client:                                  mgr.GetClient(),
+		InformerManager:                         controlPlaneInformerManager,
+		RESTMapper:                              mgr.GetRESTMapper(),
+		DynamicClient:                           dynamicClientSet,
+		SkippedResourceConfig:                   skippedResourceConfig,
+		SkippedPropagatingNamespaces:            opts.SkippedNamespacesRegexps(),
+		ResourceInterpreter:                     resourceInterpreter,
+		EventRecorder:                           mgr.GetEventRecorderFor("resource-detector"),
+		ConcurrentPropagationPolicySyncs:        opts.ConcurrentPropagationPolicySyncs,
+		ConcurrentClusterPropagationPolicySyncs: opts.ConcurrentClusterPropagationPolicySyncs,
+		ConcurrentResourceTemplateSyncs:         opts.ConcurrentResourceTemplateSyncs,
+		RateLimiterOptions:                      opts.RateLimiterOpts,
 	}
+
 	if err := mgr.Add(resourceDetector); err != nil {
 		klog.Fatalf("Failed to setup resource detector: %v", err)
 	}
-
 	if features.FeatureGate.Enabled(features.PropagateDeps) {
 		dependenciesDistributor := &dependenciesdistributor.DependenciesDistributor{
-			Client:              mgr.GetClient(),
-			DynamicClient:       dynamicClientSet,
-			InformerManager:     controlPlaneInformerManager,
-			ResourceInterpreter: resourceInterpreter,
-			RESTMapper:          mgr.GetRESTMapper(),
-			EventRecorder:       mgr.GetEventRecorderFor("dependencies-distributor"),
+			Client:                           mgr.GetClient(),
+			DynamicClient:                    dynamicClientSet,
+			InformerManager:                  controlPlaneInformerManager,
+			ResourceInterpreter:              resourceInterpreter,
+			RESTMapper:                       mgr.GetRESTMapper(),
+			EventRecorder:                    mgr.GetEventRecorderFor("dependencies-distributor"),
+			RateLimiterOptions:               opts.RateLimiterOpts,
+			ConcurrentDependentResourceSyncs: opts.ConcurrentDependentResourceSyncs,
 		}
-		if err := mgr.Add(dependenciesDistributor); err != nil {
+		if err := dependenciesDistributor.SetupWithManager(mgr); err != nil {
 			klog.Fatalf("Failed to setup dependencies distributor: %v", err)
 		}
 	}
-
 	setupClusterAPIClusterDetector(mgr, opts, stopChan)
 	controllerContext := controllerscontext.Context{
 		Mgr:           mgr,
@@ -575,15 +810,17 @@ func setupControllers(mgr controllerruntime.Manager, opts *options.Options, stop
 			ClusterCacheSyncTimeout:           opts.ClusterCacheSyncTimeout,
 			ClusterAPIQPS:                     opts.ClusterAPIQPS,
 			ClusterAPIBurst:                   opts.ClusterAPIBurst,
-			SkippedPropagatingNamespaces:      opts.SkippedPropagatingNamespaces,
+			SkippedPropagatingNamespaces:      opts.SkippedNamespacesRegexps(),
 			ConcurrentWorkSyncs:               opts.ConcurrentWorkSyncs,
 			EnableTaintManager:                opts.EnableTaintManager,
 			RateLimiterOptions:                opts.RateLimiterOpts,
 			GracefulEvictionTimeout:           opts.GracefulEvictionTimeout,
 			EnableClusterResourceModeling:     opts.EnableClusterResourceModeling,
+			HPAControllerConfiguration:        opts.HPAControllerConfiguration,
 		},
 		StopChan:                    stopChan,
 		DynamicClientSet:            dynamicClientSet,
+		KubeClientSet:               kubeClientSet,
 		OverrideManager:             overrideManager,
 		ControlPlaneInformerManager: controlPlaneInformerManager,
 		ResourceInterpreter:         resourceInterpreter,

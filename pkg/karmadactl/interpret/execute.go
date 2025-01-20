@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package interpret
 
 import (
@@ -12,7 +28,7 @@ import (
 
 	workv1alpha2 "github.com/karmada-io/karmada/pkg/apis/work/v1alpha2"
 	"github.com/karmada-io/karmada/pkg/karmadactl/util/genericresource"
-	"github.com/karmada-io/karmada/pkg/resourceinterpreter/configurableinterpreter"
+	"github.com/karmada-io/karmada/pkg/resourceinterpreter/customized/declarative"
 	"github.com/karmada-io/karmada/pkg/util/interpreter"
 )
 
@@ -80,15 +96,15 @@ func (o *Options) runExecute() error {
 		Replica:  int64(o.DesiredReplica),
 	}
 
-	interpreter := configurableinterpreter.NewConfigurableInterpreter(nil)
-	interpreter.LoadConfig(customizations)
+	configurableInterpreter := declarative.NewConfigurableInterpreter(nil)
+	configurableInterpreter.LoadConfig(customizations)
 
 	r := o.Rules.GetByOperation(o.Operation)
 	if r == nil {
 		// Shall never occur, because we validate it before.
 		return fmt.Errorf("operation %s is not supported. Use one of: %s", o.Operation, strings.Join(o.Rules.Names(), ", "))
 	}
-	result := r.Run(interpreter, args)
+	result := r.Run(configurableInterpreter, args)
 	printExecuteResult(o.Out, o.ErrOut, r.Name(), result)
 	return nil
 }

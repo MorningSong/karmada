@@ -1,4 +1,18 @@
 #!/usr/bin/env bash
+# Copyright 2020 The Karmada Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 
 set -o errexit
 set -o nounset
@@ -10,6 +24,8 @@ DIFFROOT="${SCRIPT_ROOT}/charts/karmada/_crds/bases"
 TMP_DIFFROOT="${SCRIPT_ROOT}/_tmp/charts/karmada/_crds/bases"
 DIFFEXAMPLES="${SCRIPT_ROOT}/examples/customresourceinterpreter/apis"
 TMP_DIFFEXAMPLES="${SCRIPT_ROOT}/_tmp/examples/customresourceinterpreter/apis"
+DIFFOPERATOR="${SCRIPT_ROOT}/charts/karmada-operator/crds"
+TMP_DIFFOPERATOR="${SCRIPT_ROOT}/_tmp/charts/karmada-operator/crds"
 _tmp="${SCRIPT_ROOT}/_tmp"
 
 cleanup() {
@@ -24,6 +40,9 @@ cp -a "${DIFFROOT}"/* "${TMP_DIFFROOT}"
 
 mkdir -p "${TMP_DIFFEXAMPLES}"
 cp -a "${DIFFEXAMPLES}"/* "${TMP_DIFFEXAMPLES}"
+
+mkdir -p "${TMP_DIFFOPERATOR}"
+cp -a "${DIFFOPERATOR}"/* "${TMP_DIFFOPERATOR}"
 
 bash "${SCRIPT_ROOT}/hack/update-crdgen.sh"
 echo "diffing ${DIFFROOT} against freshly generated files"
@@ -53,3 +72,14 @@ else
   echo "${DIFFEXAMPLES} is out of date. Please run hack/update-crdgen.sh"
   exit 1
 fi
+
+diff -Naupr "${DIFFOPERATOR}" "${TMP_DIFFOPERATOR}" || ret=$?
+cp -a "${TMP_DIFFOPERATOR}"/* "${DIFFOPERATOR}"
+if [[ $ret -eq 0 ]]
+then
+  echo "${DIFFOPERATOR} up to date."
+else
+  echo "${DIFFOPERATOR} is out of date. Please run hack/update-crdgen.sh"
+  exit 1
+fi
+

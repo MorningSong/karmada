@@ -1,3 +1,19 @@
+/*
+Copyright 2020 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package util
 
 import (
@@ -11,10 +27,11 @@ import (
 	"k8s.io/client-go/dynamic"
 	kubeclientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/scale"
 	"k8s.io/klog/v2"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 
 	clusterv1alpha1 "github.com/karmada-io/karmada/pkg/apis/cluster/v1alpha1"
 )
@@ -31,6 +48,13 @@ type DynamicClusterClient struct {
 	ClusterName      string
 }
 
+// ClusterScaleClient stands for a cluster ClientSet with scale client for the given member cluster
+type ClusterScaleClient struct {
+	KubeClient  *kubeclientset.Clientset
+	ScaleClient scale.ScalesGetter
+	ClusterName string
+}
+
 // Config holds the common attributes that can be passed to a Kubernetes client on
 // initialization.
 
@@ -43,6 +67,39 @@ type ClientOption struct {
 	// Burst indicates the maximum burst for throttle.
 	// If it's zero, the created RESTClient will use DefaultBurst: 10.
 	Burst int
+}
+
+// NewClusterScaleClientSet returns a ClusterScaleClient for the given member cluster.
+func NewClusterScaleClientSet(clusterName string, client client.Client) (*ClusterScaleClient, error) {
+	clusterConfig, err := BuildClusterConfig(clusterName, clusterGetter(client), secretGetter(client))
+	if err != nil {
+		return nil, err
+	}
+
+	var clusterScaleClientSet = ClusterScaleClient{ClusterName: clusterName}
+
+	if clusterConfig != nil {
+		hpaClient := kubeclientset.NewForConfigOrDie(clusterConfig)
+		scaleKindResolver := scale.NewDiscoveryScaleKindResolver(hpaClient.Discovery())
+		httpClient, err := rest.HTTPClientFor(clusterConfig)
+		if err != nil {
+			return nil, err
+		}
+		mapper, err := apiutil.NewDynamicRESTMapper(clusterConfig, httpClient)
+		if err != nil {
+			return nil, err
+		}
+
+		scaleClient, err := scale.NewForConfig(clusterConfig, mapper, dynamic.LegacyAPIPathResolverFunc, scaleKindResolver)
+		if err != nil {
+			return nil, err
+		}
+
+		clusterScaleClientSet.KubeClient = hpaClient
+		clusterScaleClientSet.ScaleClient = scaleClient
+	}
+
+	return &clusterScaleClientSet, nil
 }
 
 // NewClusterClientSet returns a ClusterClient for the given member cluster.
@@ -65,7 +122,7 @@ func NewClusterClientSet(clusterName string, client client.Client, clientOption 
 }
 
 // NewClusterClientSetForAgent returns a ClusterClient for the given member cluster which will be used in karmada agent.
-func NewClusterClientSetForAgent(clusterName string, client client.Client, clientOption *ClientOption) (*ClusterClient, error) {
+func NewClusterClientSetForAgent(clusterName string, _ client.Client, clientOption *ClientOption) (*ClusterClient, error) {
 	clusterConfig, err := controllerruntime.GetConfig()
 	if err != nil {
 		return nil, fmt.Errorf("error building kubeconfig of member cluster: %s", err.Error())
@@ -98,7 +155,7 @@ func NewClusterDynamicClientSet(clusterName string, client client.Client) (*Dyna
 }
 
 // NewClusterDynamicClientSetForAgent returns a dynamic client for the given member cluster which will be used in karmada agent.
-func NewClusterDynamicClientSetForAgent(clusterName string, client client.Client) (*DynamicClusterClient, error) {
+func NewClusterDynamicClientSetForAgent(clusterName string, _ client.Client) (*DynamicClusterClient, error) {
 	clusterConfig, err := controllerruntime.GetConfig()
 	if err != nil {
 		return nil, fmt.Errorf("error building kubeconfig of member cluster: %s", err.Error())
@@ -119,6 +176,7 @@ func BuildClusterConfig(clusterName string,
 	if err != nil {
 		return nil, err
 	}
+
 	apiEndpoint := cluster.Spec.APIEndpoint
 	if apiEndpoint == "" {
 		return nil, fmt.Errorf("the api endpoint of cluster %s is empty", clusterName)
@@ -133,24 +191,29 @@ func BuildClusterConfig(clusterName string,
 		return nil, err
 	}
 
-	token, tokenFound := secret.Data[clusterv1alpha1.SecretTokenKey]
-	if !tokenFound || len(token) == 0 {
+	token, ok := secret.Data[clusterv1alpha1.SecretTokenKey]
+	if !ok || len(token) == 0 {
 		return nil, fmt.Errorf("the secret for cluster %s is missing a non-empty value for %q", clusterName, clusterv1alpha1.SecretTokenKey)
 	}
 
-	clusterConfig, err := clientcmd.BuildConfigFromFlags(apiEndpoint, "")
-	if err != nil {
-		return nil, err
+	// Initialize cluster configuration.
+	clusterConfig := &rest.Config{
+		BearerToken: string(token),
+		Host:        apiEndpoint,
 	}
 
-	clusterConfig.BearerToken = string(token)
-
+	// Handle TLS configuration.
 	if cluster.Spec.InsecureSkipTLSVerification {
 		clusterConfig.TLSClientConfig.Insecure = true
 	} else {
-		clusterConfig.CAData = secret.Data[clusterv1alpha1.SecretCADataKey]
+		ca, ok := secret.Data[clusterv1alpha1.SecretCADataKey]
+		if !ok {
+			return nil, fmt.Errorf("the secret for cluster %s is missing the CA data key %q", clusterName, clusterv1alpha1.SecretCADataKey)
+		}
+		clusterConfig.TLSClientConfig = rest.TLSClientConfig{CAData: ca}
 	}
 
+	// Handle proxy configuration.
 	if cluster.Spec.ProxyURL != "" {
 		proxy, err := url.Parse(cluster.Spec.ProxyURL)
 		if err != nil {
@@ -158,6 +221,10 @@ func BuildClusterConfig(clusterName string,
 			return nil, err
 		}
 		clusterConfig.Proxy = http.ProxyURL(proxy)
+
+		if len(cluster.Spec.ProxyHeader) != 0 {
+			clusterConfig.Wrap(NewProxyHeaderRoundTripperWrapperConstructor(clusterConfig.WrapTransport, cluster.Spec.ProxyHeader))
+		}
 	}
 
 	return clusterConfig, nil

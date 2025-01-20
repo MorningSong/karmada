@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package store
 
 import (
@@ -15,16 +31,16 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/klog/v2"
+	utiltrace "k8s.io/utils/trace"
 )
 
 // Store is the cache for resources from multiple member clusters
 type Store interface {
-	UpdateCache(resourcesByCluster map[string]map[schema.GroupVersionResource]struct{}) error
+	UpdateCache(resourcesByCluster map[string]map[schema.GroupVersionResource]*MultiNamespace, registeredResources map[schema.GroupVersionResource]struct{}) error
 	HasResource(resource schema.GroupVersionResource) bool
 	GetResourceFromCache(ctx context.Context, gvr schema.GroupVersionResource, namespace, name string) (runtime.Object, string, error)
 	Stop()
@@ -32,14 +48,17 @@ type Store interface {
 	Get(ctx context.Context, gvr schema.GroupVersionResource, name string, options *metav1.GetOptions) (runtime.Object, error)
 	List(ctx context.Context, gvr schema.GroupVersionResource, options *metainternalversion.ListOptions) (runtime.Object, error)
 	Watch(ctx context.Context, gvr schema.GroupVersionResource, options *metainternalversion.ListOptions) (watch.Interface, error)
+
+	// ReadinessCheck checks if the storage is ready for accepting requests.
+	ReadinessCheck() error
 }
 
 // MultiClusterCache caches resource from multi member clusters
 type MultiClusterCache struct {
-	lock            sync.RWMutex
-	cache           map[string]*clusterCache
-	cachedResources map[schema.GroupVersionResource]struct{}
-	restMapper      meta.RESTMapper
+	lock                sync.RWMutex
+	cache               map[string]*clusterCache
+	registeredResources map[schema.GroupVersionResource]struct{}
+	restMapper          meta.RESTMapper
 	// newClientFunc returns a dynamic client for member cluster apiserver
 	newClientFunc func(string) (dynamic.Interface, error)
 }
@@ -49,15 +68,34 @@ var _ Store = &MultiClusterCache{}
 // NewMultiClusterCache return a cache for resources from member clusters
 func NewMultiClusterCache(newClientFunc func(string) (dynamic.Interface, error), restMapper meta.RESTMapper) *MultiClusterCache {
 	return &MultiClusterCache{
-		restMapper:      restMapper,
-		newClientFunc:   newClientFunc,
-		cache:           map[string]*clusterCache{},
-		cachedResources: map[schema.GroupVersionResource]struct{}{},
+		restMapper:          restMapper,
+		newClientFunc:       newClientFunc,
+		cache:               map[string]*clusterCache{},
+		registeredResources: map[schema.GroupVersionResource]struct{}{},
 	}
 }
 
+// ReadinessCheck checks if the storage is ready for accepting requests.
+func (c *MultiClusterCache) ReadinessCheck() error {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	var failedChecks []string
+	for cluster, cc := range c.cache {
+		if cc.readinessCheck() != nil {
+			failedChecks = append(failedChecks, cluster)
+		}
+	}
+	if len(failedChecks) == 0 {
+		klog.Infof("MultiClusterCache is ready for all registered clusters")
+		return nil
+	}
+	klog.V(4).Infof("ClusterCache is not ready for clusters: %v", failedChecks)
+	return fmt.Errorf("ClusterCache is not ready for clusters: %v", failedChecks)
+}
+
 // UpdateCache update cache for multi clusters
-func (c *MultiClusterCache) UpdateCache(resourcesByCluster map[string]map[schema.GroupVersionResource]struct{}) error {
+func (c *MultiClusterCache) UpdateCache(resourcesByCluster map[string]map[schema.GroupVersionResource]*MultiNamespace, registeredResources map[schema.GroupVersionResource]struct{}) error {
 	if klog.V(3).Enabled() {
 		start := time.Now()
 		defer func() {
@@ -69,12 +107,8 @@ func (c *MultiClusterCache) UpdateCache(resourcesByCluster map[string]map[schema
 	defer c.lock.Unlock()
 
 	// remove non-exist clusters
-	newClusterNames := sets.NewString()
-	for clusterName := range resourcesByCluster {
-		newClusterNames.Insert(clusterName)
-	}
 	for clusterName := range c.cache {
-		if !newClusterNames.Has(clusterName) {
+		if _, exist := resourcesByCluster[clusterName]; !exist {
 			klog.Infof("Remove cache for cluster %s", clusterName)
 			c.cache[clusterName].stop()
 			delete(c.cache, clusterName)
@@ -94,24 +128,7 @@ func (c *MultiClusterCache) UpdateCache(resourcesByCluster map[string]map[schema
 			return err
 		}
 	}
-
-	// update cachedResource
-	newCachedResources := make(map[schema.GroupVersionResource]struct{}, len(c.cachedResources))
-	for _, resources := range resourcesByCluster {
-		for resource := range resources {
-			newCachedResources[resource] = struct{}{}
-		}
-	}
-	for resource := range c.cachedResources {
-		if _, exist := newCachedResources[resource]; !exist {
-			delete(c.cachedResources, resource)
-		}
-	}
-	for resource := range newCachedResources {
-		if _, exist := c.cachedResources[resource]; !exist {
-			c.cachedResources[resource] = struct{}{}
-		}
-	}
+	c.registeredResources = registeredResources
 	return nil
 }
 
@@ -125,11 +142,11 @@ func (c *MultiClusterCache) Stop() {
 	}
 }
 
-// HasResource return whether resource is cached.
+// HasResource return whether resource is registered.
 func (c *MultiClusterCache) HasResource(resource schema.GroupVersionResource) bool {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
-	_, ok := c.cachedResources[resource]
+	_, ok := c.registeredResources[resource]
 	return ok
 }
 
@@ -167,33 +184,57 @@ func (c *MultiClusterCache) Get(ctx context.Context, gvr schema.GroupVersionReso
 
 // List returns the object list
 // nolint:gocyclo
-func (c *MultiClusterCache) List(ctx context.Context, gvr schema.GroupVersionResource, options *metainternalversion.ListOptions) (runtime.Object, error) {
+func (c *MultiClusterCache) List(ctx context.Context, gvr schema.GroupVersionResource, o *metainternalversion.ListOptions) (runtime.Object, error) {
+	klog.V(5).Infof("Request list %v with rv=%#v, continue=%#v, limit=%v", gvr.String(),
+		newMultiClusterResourceVersionFromString(o.ResourceVersion), newMultiClusterContinueFromString(o.Continue), o.Limit)
+	requestCluster, options, requestResourceVersion := prepareBeforeList(o)
+
 	var resultObject runtime.Object
 	items := make([]runtime.Object, 0, int(math.Min(float64(options.Limit), 1024)))
 
-	requestResourceVersion := newMultiClusterResourceVersionFromString(options.ResourceVersion)
-	requestContinue := newMultiClusterContinueFromString(options.Continue)
 	clusters := c.getClusterNames()
 	sort.Strings(clusters)
-	responseResourceVersion := newMultiClusterResourceVersionWithCapacity(len(clusters))
+	responseResourceVersion := requestResourceVersion.clone()
 	responseContinue := multiClusterContinue{}
 
+	trace := utiltrace.New("MultiClusterCache.List",
+		utiltrace.Field{Key: "gvr", Value: gvr},
+		utiltrace.Field{Key: "rv", Value: newMultiClusterResourceVersionFromString(o.ResourceVersion)},
+		utiltrace.Field{Key: "continue", Value: newMultiClusterContinueFromString(o.Continue)},
+		utiltrace.Field{Key: "limit", Value: o.Limit},
+	)
+	defer trace.LogIfLong(5 * time.Second)
+
+	defer func() {
+		klog.V(5).Infof("Response list %v with rv=%#v continue=%#v", gvr.String(), responseResourceVersion, responseContinue)
+	}()
+
 	listFunc := func(cluster string) (int, string, error) {
-		if requestContinue.Cluster != "" && requestContinue.Cluster != cluster {
+		if requestCluster != "" && requestCluster != cluster {
 			return 0, "", nil
 		}
-		options.Continue = requestContinue.Continue
 		// clear the requestContinue, for searching other clusters at next list
-		requestContinue.Cluster = ""
-		requestContinue.Continue = ""
+		defer func() {
+			requestCluster = ""
+			options.Continue = ""
+		}()
 
 		cache := c.cacheForClusterResource(cluster, gvr)
 		if cache == nil {
-			// This cluster doesn't cache this resource
+			klog.V(4).Infof("cluster %v does not cache resource %v", cluster, gvr.String())
 			return 0, "", nil
 		}
 
-		options.ResourceVersion = requestResourceVersion.get(cluster)
+		if options.Continue != "" {
+			// specifying resource version is not allowed when using continue
+			options.ResourceVersion = ""
+		} else {
+			options.ResourceVersion = requestResourceVersion.get(cluster)
+		}
+		defer trace.Step("list from member cluster",
+			utiltrace.Field{Key: "cluster", Value: cluster},
+			utiltrace.Field{Key: "options", Value: fmt.Sprintf("%#v", options)},
+		)
 		obj, err := cache.List(ctx, options)
 		if err != nil {
 			return 0, "", err
@@ -256,6 +297,11 @@ func (c *MultiClusterCache) List(ctx context.Context, gvr schema.GroupVersionRes
 		}
 	}
 
+	if err := c.fillMissingClusterResourceVersion(ctx, responseResourceVersion, clusters, gvr); err != nil {
+		return nil, err
+	}
+	responseContinue.RV = responseResourceVersion.String()
+
 	if resultObject == nil {
 		resultObject = &metav1.List{
 			TypeMeta: metav1.TypeMeta{
@@ -283,6 +329,7 @@ func (c *MultiClusterCache) List(ctx context.Context, gvr schema.GroupVersionRes
 
 // Watch watches the resource
 func (c *MultiClusterCache) Watch(ctx context.Context, gvr schema.GroupVersionResource, options *metainternalversion.ListOptions) (watch.Interface, error) {
+	klog.V(5).Infof("Request watch %v with rv=%v", gvr.String(), options.ResourceVersion)
 	resourceVersion := newMultiClusterResourceVersionFromString(options.ResourceVersion)
 
 	responseResourceVersion := newMultiClusterResourceVersionFromString(options.ResourceVersion)
@@ -315,7 +362,6 @@ func (c *MultiClusterCache) Watch(ctx context.Context, gvr schema.GroupVersionRe
 		}
 
 		mux.AddSource(w, func(e watch.Event) {
-			// We can safely modify data because it is deepCopied in cacheWatcher.convertToWatchEvent
 			setObjectResourceVersionFunc(cluster, e.Object)
 			addCacheSourceAnnotation(e.Object, cluster)
 		})
@@ -390,4 +436,91 @@ func (c *MultiClusterCache) clientForClusterFunc(cluster string) func() (dynamic
 	return func() (dynamic.Interface, error) {
 		return c.newClientFunc(cluster)
 	}
+}
+
+func (c *MultiClusterCache) fillMissingClusterResourceVersion(ctx context.Context, mcv *multiClusterResourceVersion, clusters []string, gvr schema.GroupVersionResource) error {
+	errChan := make(chan error)
+	var lock sync.Mutex
+	var wg sync.WaitGroup
+
+	for _, cluster := range clusters {
+		if _, ok := mcv.rvs[cluster]; ok {
+			continue
+		}
+
+		wg.Add(1)
+		go func(cluster string) {
+			defer wg.Done()
+			klog.V(5).Infof("fillMissingClusterResourceVersion gvr=%v cluster=%v", gvr, cluster)
+			rv, err := c.getClusterResourceVersion(ctx, cluster, gvr)
+			if err != nil {
+				errChan <- err
+				return
+			}
+			if rv == "" {
+				return
+			}
+
+			lock.Lock()
+			defer lock.Unlock()
+			mcv.set(cluster, rv)
+		}(cluster)
+	}
+
+	waitChan := make(chan struct{}, 1)
+	go func() {
+		wg.Wait()
+		waitChan <- struct{}{}
+	}()
+
+	var err error
+	select {
+	case <-waitChan:
+	case err = <-errChan:
+	}
+	return err
+}
+
+func (c *MultiClusterCache) getClusterResourceVersion(ctx context.Context, cluster string, gvr schema.GroupVersionResource) (string, error) {
+	cache := c.cacheForClusterResource(cluster, gvr)
+	if cache == nil {
+		klog.V(4).Infof("cluster %v does not cache resource %v", cluster, gvr.String())
+		return "", nil
+	}
+	obj, err := cache.List(ctx, &metainternalversion.ListOptions{
+		Limit: 1,
+	})
+	if err != nil {
+		return "", err
+	}
+	listObj, err := meta.ListAccessor(obj)
+	if err != nil {
+		return "", err
+	}
+	return listObj.GetResourceVersion(), nil
+}
+
+// Inputs and outputs:
+// o.ResourceVersion  o.Continue                     | cluster options.ResourceVersion options.Continue mrv
+// xxxx               ""                             | ""      xxxx                    ""               decode(xxx)
+// ""               {rv=xxx,cluster=c2,continue=}    | c2      decode(xxx)[c2]         ""               decode(xxx)
+// ""               {rv=xxx,cluster=c2,continue=yyy} | c2      ""                      yyy              decode(xxx)
+func prepareBeforeList(o *metainternalversion.ListOptions) (cluster string, options *metainternalversion.ListOptions, mrv *multiClusterResourceVersion) {
+	options = o.DeepCopy()
+	if o.Continue == "" {
+		mrv = newMultiClusterResourceVersionFromString(o.ResourceVersion)
+		return
+	}
+
+	mc := newMultiClusterContinueFromString(o.Continue)
+	cluster = mc.Cluster
+	mrv = newMultiClusterResourceVersionFromString(mc.RV)
+	if mc.Continue == "" {
+		options.ResourceVersion = mrv.get(cluster)
+		options.Continue = ""
+	} else {
+		options.ResourceVersion = ""
+		options.Continue = mc.Continue
+	}
+	return
 }

@@ -1,11 +1,30 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package scheduler
 
 import (
+	"fmt"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
@@ -18,6 +37,7 @@ import (
 	"github.com/karmada-io/karmada/pkg/util"
 	"github.com/karmada-io/karmada/pkg/util/fedinformer"
 	"github.com/karmada-io/karmada/pkg/util/gclient"
+	"github.com/karmada-io/karmada/pkg/util/helper"
 )
 
 // addAllEventHandlers is a helper function used in Scheduler
@@ -81,14 +101,21 @@ func (s *Scheduler) resourceBindingEventFilter(obj interface{}) bool {
 		if !schedulerNameFilter(s.schedulerName, t.Spec.SchedulerName) {
 			return false
 		}
+		if t.Spec.SchedulingSuspended() {
+			return false
+		}
 	case *workv1alpha2.ClusterResourceBinding:
 		if !schedulerNameFilter(s.schedulerName, t.Spec.SchedulerName) {
 			return false
 		}
+		if t.Spec.SchedulingSuspended() {
+			return false
+		}
 	}
 
-	return util.GetLabelValue(accessor.GetLabels(), policyv1alpha1.PropagationPolicyNameLabel) != "" ||
-		util.GetLabelValue(accessor.GetLabels(), policyv1alpha1.ClusterPropagationPolicyLabel) != ""
+	return util.GetLabelValue(accessor.GetLabels(), policyv1alpha1.PropagationPolicyPermanentIDLabel) != "" ||
+		util.GetLabelValue(accessor.GetLabels(), policyv1alpha1.ClusterPropagationPolicyPermanentIDLabel) != "" ||
+		util.GetLabelValue(accessor.GetLabels(), workv1alpha2.BindingManagedByLabel) != ""
 }
 
 func (s *Scheduler) onResourceBindingAdd(obj interface{}) {
@@ -103,6 +130,23 @@ func (s *Scheduler) onResourceBindingAdd(obj interface{}) {
 }
 
 func (s *Scheduler) onResourceBindingUpdate(old, cur interface{}) {
+	unstructuredOldObj, err := helper.ToUnstructured(old)
+	if err != nil {
+		klog.Errorf("Failed to transform oldObj, error: %v", err)
+		return
+	}
+
+	unstructuredNewObj, err := helper.ToUnstructured(cur)
+	if err != nil {
+		klog.Errorf("Failed to transform newObj, error: %v", err)
+		return
+	}
+
+	if unstructuredOldObj.GetGeneration() == unstructuredNewObj.GetGeneration() {
+		klog.V(4).Infof("Ignore update event of object (kind=%s, %s/%s) as specification no change", unstructuredOldObj.GetKind(), unstructuredOldObj.GetNamespace(), unstructuredOldObj.GetName())
+		return
+	}
+
 	key, err := cache.MetaNamespaceKeyFunc(cur)
 	if err != nil {
 		klog.Errorf("couldn't get key for object %#v: %v", cur, err)
@@ -155,7 +199,7 @@ func (s *Scheduler) updateCluster(oldObj, newObj interface{}) {
 	}
 	oldCluster, ok := oldObj.(*clusterv1alpha1.Cluster)
 	if !ok {
-		klog.Errorf("cannot convert oldObj to Cluster: %v", newObj)
+		klog.Errorf("cannot convert oldObj to Cluster: %v", oldObj)
 		return
 	}
 	klog.V(3).Infof("Update event for cluster %s", newCluster.Name)
@@ -167,51 +211,11 @@ func (s *Scheduler) updateCluster(oldObj, newObj interface{}) {
 	switch {
 	case !equality.Semantic.DeepEqual(oldCluster.Labels, newCluster.Labels):
 		fallthrough
-	case !equality.Semantic.DeepEqual(oldCluster.Spec, newCluster.Spec):
-		s.enqueueAffectedBindings(oldCluster, newCluster)
-	}
-}
-
-// enqueueAffectedBinding find all RBs/CRBs related to the cluster and reschedule them
-func (s *Scheduler) enqueueAffectedBindings(oldCluster, newCluster *clusterv1alpha1.Cluster) {
-	bindings, _ := s.bindingLister.List(labels.Everything())
-	for _, binding := range bindings {
-		placementPtr := binding.Spec.Placement
-		if placementPtr == nil {
-			continue
-		}
-		affinity := placementPtr.ClusterAffinity
-		switch {
-		case affinity == nil:
-			// If no clusters specified, add it to the queue
-			fallthrough
-		case util.ClusterMatches(newCluster, *affinity):
-			// If the new cluster manifest match the affinity, add it to the queue, trigger rescheduling
-			fallthrough
-		case util.ClusterMatches(oldCluster, *affinity):
-			// If the old cluster manifest match the affinity, add it to the queue, trigger rescheduling
-			s.onResourceBindingRequeue(binding, metrics.ClusterChanged)
-		}
-	}
-
-	clusterBindings, _ := s.clusterBindingLister.List(labels.Everything())
-	for _, binding := range clusterBindings {
-		placementPtr := binding.Spec.Placement
-		if placementPtr == nil {
-			continue
-		}
-		affinity := placementPtr.ClusterAffinity
-		switch {
-		case affinity == nil:
-			// If no clusters specified, add it to the queue
-			fallthrough
-		case util.ClusterMatches(newCluster, *affinity):
-			// If the new cluster manifest match the affinity, add it to the queue, trigger rescheduling
-			fallthrough
-		case util.ClusterMatches(oldCluster, *affinity):
-			// If the old cluster manifest match the affinity, add it to the queue, trigger rescheduling
-			s.onClusterResourceBindingRequeue(binding, metrics.ClusterChanged)
-		}
+	case oldCluster.Generation != newCluster.Generation:
+		// To distinguish the obd and new cluster objects, we need to add the entire object
+		// to the worker. Therefore, call Add func instead of Enqueue func.
+		s.clusterReconcileWorker.Add(oldCluster)
+		s.clusterReconcileWorker.Add(newCluster)
 	}
 }
 
@@ -245,4 +249,105 @@ func schedulerNameFilter(schedulerNameFromOptions, schedulerName string) bool {
 	}
 
 	return schedulerNameFromOptions == schedulerName
+}
+
+func (s *Scheduler) reconcileCluster(key util.QueueKey) error {
+	cluster, ok := key.(*clusterv1alpha1.Cluster)
+	if !ok {
+		return fmt.Errorf("invalid cluster key: %s", key)
+	}
+	return utilerrors.NewAggregate([]error{
+		s.enqueueAffectedBindings(cluster),
+		s.enqueueAffectedCRBs(cluster)},
+	)
+}
+
+// enqueueAffectedBindings find all RBs related to the cluster and reschedule them
+func (s *Scheduler) enqueueAffectedBindings(cluster *clusterv1alpha1.Cluster) error {
+	klog.V(4).Infof("Enqueue affected ResourceBinding with cluster %s", cluster.Name)
+
+	bindings, _ := s.bindingLister.List(labels.Everything())
+	for _, binding := range bindings {
+		placementPtr := binding.Spec.Placement
+		if placementPtr == nil {
+			// never reach here
+			continue
+		}
+
+		var affinity *policyv1alpha1.ClusterAffinity
+		if placementPtr.ClusterAffinities != nil {
+			if binding.Status.SchedulerObservedGeneration != binding.Generation {
+				// Hit here means the binding maybe still in the queue waiting
+				// for scheduling or its status has not been synced to the
+				// cache. Just enqueue the binding to avoid missing the cluster
+				// update event.
+				if schedulerNameFilter(s.schedulerName, binding.Spec.SchedulerName) {
+					s.onResourceBindingRequeue(binding, metrics.ClusterChanged)
+				}
+				continue
+			}
+			affinityIndex := getAffinityIndex(placementPtr.ClusterAffinities, binding.Status.SchedulerObservedAffinityName)
+			affinity = &placementPtr.ClusterAffinities[affinityIndex].ClusterAffinity
+		} else {
+			affinity = placementPtr.ClusterAffinity
+		}
+
+		switch {
+		case affinity == nil:
+			// If no clusters specified, add it to the queue
+			fallthrough
+		case util.ClusterMatches(cluster, *affinity):
+			// If the cluster manifest match the affinity, add it to the queue, trigger rescheduling
+			if schedulerNameFilter(s.schedulerName, binding.Spec.SchedulerName) {
+				s.onResourceBindingRequeue(binding, metrics.ClusterChanged)
+			}
+		}
+	}
+
+	return nil
+}
+
+// enqueueAffectedCRBs find all CRBs related to the cluster and reschedule them
+func (s *Scheduler) enqueueAffectedCRBs(cluster *clusterv1alpha1.Cluster) error {
+	klog.V(4).Infof("Enqueue affected ClusterResourceBinding with cluster %s", cluster.Name)
+
+	clusterBindings, _ := s.clusterBindingLister.List(labels.Everything())
+	for _, binding := range clusterBindings {
+		placementPtr := binding.Spec.Placement
+		if placementPtr == nil {
+			// never reach here
+			continue
+		}
+
+		var affinity *policyv1alpha1.ClusterAffinity
+		if placementPtr.ClusterAffinities != nil {
+			if binding.Status.SchedulerObservedGeneration != binding.Generation {
+				// Hit here means the binding maybe still in the queue waiting
+				// for scheduling or its status has not been synced to the
+				// cache. Just enqueue the binding to avoid missing the cluster
+				// update event.
+				if schedulerNameFilter(s.schedulerName, binding.Spec.SchedulerName) {
+					s.onClusterResourceBindingRequeue(binding, metrics.ClusterChanged)
+				}
+				continue
+			}
+			affinityIndex := getAffinityIndex(placementPtr.ClusterAffinities, binding.Status.SchedulerObservedAffinityName)
+			affinity = &placementPtr.ClusterAffinities[affinityIndex].ClusterAffinity
+		} else {
+			affinity = placementPtr.ClusterAffinity
+		}
+
+		switch {
+		case affinity == nil:
+			// If no clusters specified, add it to the queue
+			fallthrough
+		case util.ClusterMatches(cluster, *affinity):
+			// If the cluster manifest match the affinity, add it to the queue, trigger rescheduling
+			if schedulerNameFilter(s.schedulerName, binding.Spec.SchedulerName) {
+				s.onClusterResourceBindingRequeue(binding, metrics.ClusterChanged)
+			}
+		}
+	}
+
+	return nil
 }

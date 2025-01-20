@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package status
 
 import (
@@ -160,6 +176,60 @@ func TestThresholdAdjustedReadyCondition(t *testing.T) {
 				Status: metav1.ConditionTrue,
 			},
 		},
+		{
+			name: "ready condition changes from true to false",
+			clusterData: &clusterData{
+				readyCondition:     metav1.ConditionTrue,
+				thresholdStartTime: time.Now().Add(-10 * time.Minute),
+			},
+			currentCondition: &metav1.Condition{
+				Type:   clusterv1alpha1.ClusterConditionReady,
+				Status: metav1.ConditionTrue,
+			},
+			observedCondition: &metav1.Condition{
+				Type:   clusterv1alpha1.ClusterConditionReady,
+				Status: metav1.ConditionFalse,
+			},
+			expectedCondition: &metav1.Condition{
+				Type:   clusterv1alpha1.ClusterConditionReady,
+				Status: metav1.ConditionTrue,
+			},
+		},
+		{
+			name: "ready condition changes from false to true",
+			clusterData: &clusterData{
+				readyCondition:     metav1.ConditionFalse,
+				thresholdStartTime: time.Now().Add(-10 * time.Minute),
+			},
+			currentCondition: &metav1.Condition{
+				Type:   clusterv1alpha1.ClusterConditionReady,
+				Status: metav1.ConditionFalse,
+			},
+			observedCondition: &metav1.Condition{
+				Type:   clusterv1alpha1.ClusterConditionReady,
+				Status: metav1.ConditionTrue,
+			},
+			expectedCondition: &metav1.Condition{
+				Type:   clusterv1alpha1.ClusterConditionReady,
+				Status: metav1.ConditionFalse,
+			},
+		},
+		{
+			name: "current condition is nil, should return observed condition",
+			clusterData: &clusterData{
+				readyCondition:     metav1.ConditionFalse,
+				thresholdStartTime: time.Now().Add(-clusterFailureThreshold),
+			},
+			currentCondition: nil,
+			observedCondition: &metav1.Condition{
+				Type:   clusterv1alpha1.ClusterConditionReady,
+				Status: metav1.ConditionTrue,
+			},
+			expectedCondition: &metav1.Condition{
+				Type:   clusterv1alpha1.ClusterConditionReady,
+				Status: metav1.ConditionTrue,
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -185,5 +255,113 @@ func TestThresholdAdjustedReadyCondition(t *testing.T) {
 				t.Fatalf("expected: %s, but got: %s", tt.expectedCondition.Status, thresholdReadyCondition.Status)
 			}
 		})
+	}
+}
+
+func TestClusterConditionStore_Get(t *testing.T) {
+	// Create a new clusterConditionStore
+	store := clusterConditionStore{}
+
+	// Create a new clusterData object
+	cluster := "test-cluster"
+	now := time.Now()
+	data := &clusterData{
+		readyCondition:     metav1.ConditionTrue,
+		thresholdStartTime: now,
+	}
+
+	// Add the clusterData object to the store
+	store.clusterDataMap.Store(cluster, data)
+
+	// Call the get function and check the returned value
+	result := store.get(cluster)
+	if result == nil {
+		t.Errorf("Expected non-nil result, got nil")
+	}
+	if result != data {
+		t.Errorf("Expected %v, got %v", data, result)
+	}
+
+	// Call the get function with a non-existent cluster and check the returned value
+	result = store.get("non-existent-cluster")
+	if result != nil {
+		t.Errorf("Expected nil result, got %v", result)
+	}
+}
+
+func TestClusterConditionStore_Update(t *testing.T) {
+	// Create a new clusterConditionStore
+	store := &clusterConditionStore{}
+
+	// Create a new clusterData object
+	cluster := "test-cluster"
+	now := time.Now()
+	data := &clusterData{
+		readyCondition:     metav1.ConditionTrue,
+		thresholdStartTime: now,
+	}
+
+	t.Run("Test update with new data", func(t *testing.T) {
+		// Update the cluster with new data
+		store.update(cluster, data)
+
+		// Retrieve the updated data and verify it
+		result := store.get(cluster)
+		if result == nil {
+			t.Errorf("Expected non-nil result, got nil")
+		}
+		if result != data {
+			t.Errorf("Expected %v, got %v", data, result)
+		}
+	})
+
+	t.Run("Test update with same data", func(t *testing.T) {
+		// Update the cluster with the same data
+		store.update(cluster, data)
+
+		// Retrieve the updated data and verify it
+		result := store.get(cluster)
+		if result == nil {
+			t.Errorf("Expected non-nil result, got nil")
+		}
+		if result != data {
+			t.Errorf("Expected %v, got %v", data, result)
+		}
+	})
+
+	t.Run("Test update with nil data", func(t *testing.T) {
+		// Update the cluster with nil data
+		store.update(cluster, nil)
+
+		// Retrieve the updated data and verify it
+		result := store.get(cluster)
+		if result != nil {
+			t.Errorf("Expected nil result, got %v", result)
+		}
+	})
+}
+
+func TestClusterConditionStore_Delete(t *testing.T) {
+	// Create a new clusterConditionStore
+	store := clusterConditionStore{}
+
+	// Create a new clusterData object
+	cluster := "test-cluster"
+	now := time.Now()
+	data := &clusterData{
+		readyCondition:     metav1.ConditionTrue,
+		thresholdStartTime: now,
+	}
+
+	// Add the clusterData object to the store
+	store.clusterDataMap.Store(cluster, data)
+
+	// Delete the clusterData object from the store
+	store.delete(cluster)
+
+	// Call the get function with the deleted cluster and check the returned value
+	result := store.get(cluster)
+	if result != nil {
+		t.Errorf("Expected nil result, got %v", result)
 	}
 }

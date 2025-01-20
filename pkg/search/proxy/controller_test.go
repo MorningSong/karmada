@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package proxy
 
 import (
@@ -28,6 +44,7 @@ import (
 	karmadainformers "github.com/karmada-io/karmada/pkg/generated/informers/externalversions"
 	"github.com/karmada-io/karmada/pkg/search/proxy/framework"
 	pluginruntime "github.com/karmada-io/karmada/pkg/search/proxy/framework/runtime"
+	"github.com/karmada-io/karmada/pkg/search/proxy/store"
 	proxytest "github.com/karmada-io/karmada/pkg/search/proxy/testing"
 	"github.com/karmada-io/karmada/pkg/util"
 )
@@ -276,7 +293,7 @@ func TestController_reconcile(t *testing.T) {
 				clusterLister:  karmadaFactory.Cluster().V1alpha1().Clusters().Lister(),
 				registryLister: karmadaFactory.Search().V1alpha1().ResourceRegistries().Lister(),
 				store: &proxytest.MockStore{
-					UpdateCacheFunc: func(m map[string]map[schema.GroupVersionResource]struct{}) error {
+					UpdateCacheFunc: func(m map[string]map[schema.GroupVersionResource]*store.MultiNamespace, _ map[schema.GroupVersionResource]struct{}) error {
 						for clusterName, resources := range m {
 							resourceNames := make([]string, 0, len(resources))
 							for resource := range resources {
@@ -320,11 +337,11 @@ func (r *mockPlugin) Order() int {
 	return r.TheOrder
 }
 
-func (r *mockPlugin) SupportRequest(request framework.ProxyRequest) bool {
+func (r *mockPlugin) SupportRequest(_ framework.ProxyRequest) bool {
 	return r.IsSupportRequest
 }
 
-func (r *mockPlugin) Connect(ctx context.Context, request framework.ProxyRequest) (http.Handler, error) {
+func (r *mockPlugin) Connect(_ context.Context, _ framework.ProxyRequest) (http.Handler, error) {
 	return http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		r.Called = true
 	}), nil
@@ -446,11 +463,11 @@ func (r *failPlugin) Order() int {
 	return 0
 }
 
-func (r *failPlugin) SupportRequest(request framework.ProxyRequest) bool {
+func (r *failPlugin) SupportRequest(_ framework.ProxyRequest) bool {
 	return true
 }
 
-func (r *failPlugin) Connect(ctx context.Context, request framework.ProxyRequest) (http.Handler, error) {
+func (r *failPlugin) Connect(_ context.Context, _ framework.ProxyRequest) (http.Handler, error) {
 	return nil, fmt.Errorf("test")
 }
 
@@ -493,9 +510,28 @@ func TestController_Connect_Error(t *testing.T) {
 
 func newCluster(name string) *clusterv1alpha1.Cluster {
 	c := &clusterv1alpha1.Cluster{}
+	clusterEnablements := []clusterv1alpha1.APIEnablement{
+		{
+			GroupVersion: "v1",
+			Resources: []clusterv1alpha1.APIResource{
+				{
+					Kind: "Pod",
+				},
+			},
+		},
+		{
+			GroupVersion: "v1",
+			Resources: []clusterv1alpha1.APIResource{
+				{
+					Kind: "Node",
+				},
+			},
+		},
+	}
 	c.Name = name
 	conditions := make([]metav1.Condition, 0, 1)
 	conditions = append(conditions, util.NewCondition(clusterv1alpha1.ClusterConditionReady, "", "", metav1.ConditionTrue))
 	c.Status.Conditions = conditions
+	c.Status.APIEnablements = clusterEnablements
 	return c
 }

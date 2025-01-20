@@ -1,4 +1,25 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+// Given mockgen does not group imports according to our project's conventions.
+// Following the mockgen command, we run 'goimports', which reformats the
+// generated file to ensure that all imports are properly grouped and sorted,
+// maintaining consistency with the rest of our codebase.
 //go:generate mockgen -source=interface.go -destination=testing/mock_interface.go -package=testing FilterPlugin ScorePlugin ScoreExtensions
+//go:generate goimports -local "github.com/karmada-io/karmada" -w testing/mock_interface.go
 
 package framework
 
@@ -8,7 +29,6 @@ import (
 	"strings"
 
 	clusterv1alpha1 "github.com/karmada-io/karmada/pkg/apis/cluster/v1alpha1"
-	policyv1alpha1 "github.com/karmada-io/karmada/pkg/apis/policy/v1alpha1"
 	workv1alpha2 "github.com/karmada-io/karmada/pkg/apis/work/v1alpha2"
 )
 
@@ -26,10 +46,10 @@ type Framework interface {
 
 	// RunFilterPlugins runs the set of configured Filter plugins for resources on
 	// the given cluster.
-	RunFilterPlugins(ctx context.Context, placement *policyv1alpha1.Placement, bindingSpec *workv1alpha2.ResourceBindingSpec, clusterv1alpha1 *clusterv1alpha1.Cluster) *Result
+	RunFilterPlugins(ctx context.Context, bindingSpec *workv1alpha2.ResourceBindingSpec, bindingStatus *workv1alpha2.ResourceBindingStatus, cluster *clusterv1alpha1.Cluster) *Result
 
-	// RunScorePlugins runs the set of configured Score plugins, it returns a map of plugin name to cores
-	RunScorePlugins(ctx context.Context, placement *policyv1alpha1.Placement, spec *workv1alpha2.ResourceBindingSpec, clusters []*clusterv1alpha1.Cluster) (PluginToClusterScores, *Result)
+	// RunScorePlugins runs the set of configured Score plugins, it returns a map of plugin names to scores
+	RunScorePlugins(ctx context.Context, spec *workv1alpha2.ResourceBindingSpec, clusters []*clusterv1alpha1.Cluster) (PluginToClusterScores, *Result)
 }
 
 // Plugin is the parent type for all the scheduling framework plugins.
@@ -42,7 +62,7 @@ type Plugin interface {
 type FilterPlugin interface {
 	Plugin
 	// Filter is called by the scheduling framework.
-	Filter(ctx context.Context, placement *policyv1alpha1.Placement, bindingSpec *workv1alpha2.ResourceBindingSpec, clusterv1alpha1 *clusterv1alpha1.Cluster) *Result
+	Filter(ctx context.Context, bindingSpec *workv1alpha2.ResourceBindingSpec, bindingStatus *workv1alpha2.ResourceBindingStatus, cluster *clusterv1alpha1.Cluster) *Result
 }
 
 // Result indicates the result of running a plugin. It consists of a code, a
@@ -63,7 +83,7 @@ const (
 	// NOTE: A nil status is also considered as "Success".
 	Success Code = iota
 	// Unschedulable is used when a plugin finds the resource unschedulable.
-	// The accompanying status message should explain why the it is unschedulable.
+	// The accompanying status message should explain why it is unschedulable.
 	Unschedulable
 	// Error is used for internal plugin errors, unexpected input, etc.
 	Error
@@ -164,7 +184,7 @@ type ScorePlugin interface {
 	// Score is called on each filtered cluster. It must return success and an integer
 	// indicating the rank of the cluster. All scoring plugins must return success or
 	// the resource will be rejected.
-	Score(ctx context.Context, placement *policyv1alpha1.Placement, spec *workv1alpha2.ResourceBindingSpec, cluster *clusterv1alpha1.Cluster) (int64, *Result)
+	Score(ctx context.Context, spec *workv1alpha2.ResourceBindingSpec, cluster *clusterv1alpha1.Cluster) (int64, *Result)
 
 	// ScoreExtensions returns a ScoreExtensions interface
 	// if it implements one, or nil if does not.

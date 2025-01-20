@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package storage
 
 import (
@@ -31,7 +47,7 @@ type reqResponse struct {
 	Items []runtime.Object `json:"items"`
 }
 
-func (r *SearchREST) newCacheHandler(info *genericrequest.RequestInfo, responder rest.Responder) (http.Handler, error) {
+func (r *SearchREST) newCacheHandler(info *genericrequest.RequestInfo, _ rest.Responder) (http.Handler, error) {
 	resourceGVR := schema.GroupVersionResource{
 		Group:    info.APIGroup,
 		Version:  info.APIVersion,
@@ -40,7 +56,7 @@ func (r *SearchREST) newCacheHandler(info *genericrequest.RequestInfo, responder
 
 	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		enc := json.NewEncoder(rw)
-
+		rw.Header().Set("Content-Type", "application/json")
 		opts := metainternalversion.ListOptions{}
 		if err := searchscheme.ParameterCodec.DecodeParameters(req.URL.Query(), metav1.SchemeGroupVersion, &opts); err != nil {
 			rw.WriteHeader(http.StatusBadRequest)
@@ -49,7 +65,7 @@ func (r *SearchREST) newCacheHandler(info *genericrequest.RequestInfo, responder
 			return
 		}
 
-		if errs := metainternalversionvalidation.ValidateListOptions(&opts); len(errs) > 0 {
+		if errs := metainternalversionvalidation.ValidateListOptions(&opts, false); len(errs) > 0 {
 			rw.WriteHeader(http.StatusBadRequest)
 			klog.Errorf("Invalid decoded ListOptions: %v.", errs)
 			_ = enc.Encode(errorResponse{Error: errs.ToAggregate().Error()})
@@ -71,13 +87,21 @@ func (r *SearchREST) newCacheHandler(info *genericrequest.RequestInfo, responder
 		// TODO: process opts.Limit to prevent the client from being unable to process the response
 		// due to the large size of the response body.
 		objItems := r.getObjectItemsFromClusters(clusters, resourceGVR, info.Namespace, info.Name, label)
+		kind, err := r.restMapper.KindFor(resourceGVR)
+		if err != nil {
+			rw.WriteHeader(http.StatusInternalServerError)
+			klog.Errorf("Failed to find kind, resource: %s, %v", resourceGVR.Resource, err)
+			_ = enc.Encode(errorResponse{Error: err.Error()})
+			return
+		}
 		rr := reqResponse{
 			TypeMeta: metav1.TypeMeta{
 				APIVersion: resourceGVR.GroupVersion().String(),
-				Kind:       "List", // TODO: obtains the kind type of the actual resource list.
+				Kind:       kind.Kind + "List",
 			},
 			Items: objItems,
 		}
+		rw.Header().Set("Content-Type", "application/json; charset=utf-8")
 		_ = enc.Encode(rr)
 	}), nil
 }
@@ -111,7 +135,7 @@ func (r *SearchREST) getObjectItemsFromClusters(
 					objGVR, namespace, name, cluster.Name, err)
 				continue
 			}
-			items = append(items, addAnnotationWithClusterName([]runtime.Object{resourceObject}, cluster.Name)...)
+			items = append(items, addAnnotationWithClusterName([]runtime.Object{resourceObject.DeepCopyObject()}, cluster.Name)...)
 		} else {
 			var resourceObjects []runtime.Object
 			if len(namespace) > 0 {
@@ -124,7 +148,13 @@ func (r *SearchREST) getObjectItemsFromClusters(
 					objGVR, cluster.Name, err)
 				continue
 			}
-			items = append(items, addAnnotationWithClusterName(resourceObjects, cluster.Name)...)
+
+			cloneObjects := make([]runtime.Object, len(resourceObjects))
+			for i := range resourceObjects {
+				cloneObjects[i] = resourceObjects[i].DeepCopyObject()
+			}
+
+			items = append(items, addAnnotationWithClusterName(cloneObjects, cluster.Name)...)
 		}
 	}
 

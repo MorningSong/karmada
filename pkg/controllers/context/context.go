@@ -1,14 +1,33 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package context
 
 import (
+	"regexp"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/dynamic"
+	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 
+	"github.com/karmada-io/karmada/pkg/controllers/federatedhpa/config"
 	"github.com/karmada-io/karmada/pkg/resourceinterpreter"
 	"github.com/karmada-io/karmada/pkg/sharedcli/ratelimiterflag"
 	"github.com/karmada-io/karmada/pkg/util/fedinformer/genericmanager"
@@ -52,8 +71,8 @@ type Options struct {
 	ClusterAPIQPS float32
 	// ClusterAPIBurst is the burst to allow while talking with cluster kube-apiserver.
 	ClusterAPIBurst int
-	// SkippedPropagatingNamespaces is a list of namespaces that will be skipped for propagating.
-	SkippedPropagatingNamespaces []string
+	// SkippedPropagatingNamespaces is a list of namespace regular expressions, matching namespaces will be skipped propagating.
+	SkippedPropagatingNamespaces []*regexp.Regexp
 	// ClusterName is the name of cluster.
 	ClusterName string
 	// ConcurrentWorkSyncs is the number of Works that are allowed to sync concurrently.
@@ -78,6 +97,8 @@ type Options struct {
 	CertRotationRemainingTimeThreshold float64
 	// KarmadaKubeconfigNamespace is the namespace of the secret containing karmada-agent certificate.
 	KarmadaKubeconfigNamespace string
+	// HPAControllerConfiguration is the config of federatedHPA-controller.
+	HPAControllerConfiguration config.HPAControllerConfiguration
 }
 
 // Context defines the context object for controller.
@@ -87,6 +108,7 @@ type Context struct {
 	Opts                        Options
 	StopChan                    <-chan struct{}
 	DynamicClientSet            dynamic.Interface
+	KubeClientSet               clientset.Interface
 	OverrideManager             overridemanager.OverrideManager
 	ControlPlaneInformerManager genericmanager.SingleClusterInformerManager
 	ResourceInterpreter         resourceinterpreter.ResourceInterpreter

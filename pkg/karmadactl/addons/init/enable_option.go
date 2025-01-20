@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package init
 
 import (
@@ -12,6 +28,8 @@ import (
 
 	cmdinit "github.com/karmada-io/karmada/pkg/karmadactl/cmdinit/kubernetes"
 	"github.com/karmada-io/karmada/pkg/karmadactl/util/apiclient"
+	"github.com/karmada-io/karmada/pkg/util/names"
+	"github.com/karmada-io/karmada/pkg/version"
 )
 
 // CommandAddonsEnableOption options for addons list.
@@ -26,19 +44,86 @@ type CommandAddonsEnableOption struct {
 
 	KarmadaDeschedulerReplicas int32
 
+	KarmadaMetricsAdapterImage string
+
+	KarmadaMetricsAdapterReplicas int32
+
 	KarmadaSchedulerEstimatorImage string
 
 	KarmadaEstimatorReplicas int32
 
 	KarmadaKubeClientSet *kubernetes.Clientset
 
-	WaitPodReadyTimeout int
+	ImageRegistry string
+
+	WaitComponentReadyTimeout int
 
 	WaitAPIServiceReadyTimeout int
 
 	MemberKubeConfig string
 
 	MemberContext string
+
+	HostClusterDomain string
+}
+
+var (
+	// DefaultKarmadaDeschedulerImage Karmada descheduler image
+	DefaultKarmadaDeschedulerImage string
+	// DefaultKarmadaSchedulerEstimatorImage Karmada scheduler-estimator image
+	DefaultKarmadaSchedulerEstimatorImage string
+	// DefaultKarmadaSearchImage Karmada search image
+	DefaultKarmadaSearchImage string
+	// DefaultKarmadaMetricsAdapterImage Karmada metrics adapter image
+	DefaultKarmadaMetricsAdapterImage string
+
+	karmadaRelease string
+)
+
+func init() {
+	releaseVer, err := version.ParseGitVersion(version.Get().GitVersion)
+	if err != nil {
+		klog.Infof("No default release version found. build version: %s", version.Get().String())
+		releaseVer = &version.ReleaseVersion{} // initialize to avoid panic
+	}
+	karmadaRelease = releaseVer.ReleaseVersion()
+
+	DefaultKarmadaDeschedulerImage = fmt.Sprintf("docker.io/karmada/karmada-descheduler:%s", releaseVer.ReleaseVersion())
+	DefaultKarmadaSchedulerEstimatorImage = fmt.Sprintf("docker.io/karmada/karmada-scheduler-estimator:%s", releaseVer.ReleaseVersion())
+	DefaultKarmadaSearchImage = fmt.Sprintf("docker.io/karmada/karmada-search:%s", releaseVer.ReleaseVersion())
+	DefaultKarmadaMetricsAdapterImage = fmt.Sprintf("docker.io/karmada/karmada-metrics-adapter:%s", releaseVer.ReleaseVersion())
+}
+
+// KarmadaDeschedulerImage get karmada descheduler image
+func KarmadaDeschedulerImage(o *CommandAddonsEnableOption) string {
+	if o.ImageRegistry != "" && o.KarmadaDeschedulerImage == DefaultKarmadaDeschedulerImage {
+		return o.ImageRegistry + "/karmada-descheduler:" + karmadaRelease
+	}
+	return o.KarmadaDeschedulerImage
+}
+
+// KarmadaSchedulerEstimatorImage get karmada scheduler-estimator image
+func KarmadaSchedulerEstimatorImage(o *CommandAddonsEnableOption) string {
+	if o.ImageRegistry != "" && o.KarmadaSchedulerEstimatorImage == DefaultKarmadaSchedulerEstimatorImage {
+		return o.ImageRegistry + "/karmada-scheduler-estimator:" + karmadaRelease
+	}
+	return o.KarmadaSchedulerEstimatorImage
+}
+
+// KarmadaSearchImage get karmada search image
+func KarmadaSearchImage(o *CommandAddonsEnableOption) string {
+	if o.ImageRegistry != "" && o.KarmadaSearchImage == DefaultKarmadaSearchImage {
+		return o.ImageRegistry + "/karmada-search:" + karmadaRelease
+	}
+	return o.KarmadaSearchImage
+}
+
+// KarmadaMetricsAdapterImage get karmada metrics adapter image
+func KarmadaMetricsAdapterImage(o *CommandAddonsEnableOption) string {
+	if o.ImageRegistry != "" && o.KarmadaMetricsAdapterImage == DefaultKarmadaMetricsAdapterImage {
+		return o.ImageRegistry + "/karmada-metrics-adapter:" + karmadaRelease
+	}
+	return o.KarmadaMetricsAdapterImage
 }
 
 // Complete the conditions required to be able to run enable.
@@ -72,11 +157,11 @@ func (o *CommandAddonsEnableOption) Validate(args []string) error {
 	}
 
 	if o.Cluster == "" {
-		if slices.Contains(args, EstimatorResourceName) {
+		if slices.Contains(args, names.KarmadaSchedulerEstimatorComponentName) {
 			return fmt.Errorf("member cluster is needed when enable karmada-scheduler-estimator,use `--cluster=member --member-kubeconfig /root/.kube/config --member-context member1` to enable karmada-scheduler-estimator")
 		}
 	} else {
-		if !slices.Contains(args, EstimatorResourceName) && !slices.Contains(args, "all") {
+		if !slices.Contains(args, names.KarmadaSchedulerEstimatorComponentName) && !slices.Contains(args, "all") {
 			return fmt.Errorf("cluster is needed only when enable karmada-scheduler-estimator or enable all")
 		}
 		if o.MemberKubeConfig == "" {

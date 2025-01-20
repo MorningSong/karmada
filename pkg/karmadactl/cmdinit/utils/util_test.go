@@ -1,3 +1,19 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package utils
 
 import (
@@ -9,6 +25,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -45,7 +62,7 @@ func TestDownloadFile(t *testing.T) {
 		return buf
 	}()
 
-	s := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+	s := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
 		if _, err := io.Copy(rw, serverTar); err != nil {
 			t.Fatal(err)
 		}
@@ -77,5 +94,46 @@ func TestDownloadFile(t *testing.T) {
 
 	if want := testFileContent; !bytes.Equal(got, want) {
 		t.Errorf("DeCompress() got %v, want %v", got, want)
+	}
+}
+
+func TestListFiles(t *testing.T) {
+	tests := []struct {
+		name      string
+		path      string
+		tempfiles []string
+	}{
+		{
+			name:      "get files from path",
+			path:      "temp-path" + randString(),
+			tempfiles: []string{"tempfiles1" + randString(), "tempfiles2" + randString()},
+		},
+		{
+			name:      "no files from path",
+			path:      "temp-path" + randString(),
+			tempfiles: []string{},
+		},
+	}
+	for _, tt := range tests {
+		err := os.Mkdir(tt.path, 0755)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.RemoveAll(tt.path)
+
+		var want []string
+		for i := 0; i < len(tt.tempfiles); i++ {
+			want = append(want, tt.path+"/"+tt.tempfiles[i])
+			_, err = os.Create(tt.path + "/" + tt.tempfiles[i])
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ListFiles(tt.path + "/"); !reflect.DeepEqual(got, want) {
+				t.Errorf("ListFiles() = %v, want %v", got, want)
+			}
+		})
 	}
 }

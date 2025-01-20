@@ -1,9 +1,26 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package keys
 
 import (
 	"fmt"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -50,6 +67,44 @@ var (
 			Name:      "bar",
 		},
 	}
+	deploymentObj = appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "foo",
+			Name:      "bar",
+		},
+	}
+	podWithEmptyGroup = &corev1.Pod{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Pod",
+			APIVersion: "",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "foo",
+			Name:      "bar",
+		},
+	}
+
+	podWithEmptyKind = &corev1.Pod{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "",
+			APIVersion: "v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "foo",
+			Name:      "bar",
+		},
+	}
+
+	secretWithEmptyNamespace = &corev1.Secret{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Secret",
+			APIVersion: "v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "",
+			Name:      "bar",
+		},
+	}
 )
 
 func TestClusterWideKeyFunc(t *testing.T) {
@@ -92,6 +147,27 @@ func TestClusterWideKeyFunc(t *testing.T) {
 			name:      "nil object should be error",
 			object:    nil,
 			expectErr: true,
+		},
+		{
+			name:      "non APIVersion and kind runtime object should be error",
+			object:    deploymentObj,
+			expectErr: true,
+		},
+		{
+			name:      "resource with empty group",
+			object:    podWithEmptyGroup,
+			expectErr: true,
+		},
+		{
+			name:      "resource with empty kind",
+			object:    podWithEmptyKind,
+			expectErr: true,
+		},
+		{
+			name:         "resource with empty namespace",
+			object:       secretWithEmptyNamespace,
+			expectErr:    false,
+			expectKeyStr: "v1, kind=Secret, bar",
 		},
 	}
 

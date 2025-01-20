@@ -1,19 +1,31 @@
+/*
+Copyright 2020 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package binding
 
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
@@ -22,12 +34,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 
-	configv1alpha1 "github.com/karmada-io/karmada/pkg/apis/config/v1alpha1"
 	policyv1alpha1 "github.com/karmada-io/karmada/pkg/apis/policy/v1alpha1"
-	workv1alpha1 "github.com/karmada-io/karmada/pkg/apis/work/v1alpha1"
 	workv1alpha2 "github.com/karmada-io/karmada/pkg/apis/work/v1alpha2"
 	"github.com/karmada-io/karmada/pkg/events"
 	"github.com/karmada-io/karmada/pkg/metrics"
@@ -37,10 +47,9 @@ import (
 	"github.com/karmada-io/karmada/pkg/util/fedinformer/genericmanager"
 	"github.com/karmada-io/karmada/pkg/util/helper"
 	"github.com/karmada-io/karmada/pkg/util/overridemanager"
-	"github.com/karmada-io/karmada/pkg/util/restmapper"
 )
 
-// ControllerName is the controller name that will be used when reporting events.
+// ControllerName is the controller name that will be used when reporting events and metrics.
 const ControllerName = "binding-controller"
 
 // ResourceBindingController is to sync ResourceBinding.
@@ -68,42 +77,42 @@ func (c *ResourceBindingController) Reconcile(ctx context.Context, req controlle
 			return controllerruntime.Result{}, nil
 		}
 
-		return controllerruntime.Result{Requeue: true}, err
+		return controllerruntime.Result{}, err
 	}
 
 	if !binding.DeletionTimestamp.IsZero() {
 		klog.V(4).Infof("Begin to delete works owned by binding(%s).", req.NamespacedName.String())
-		if err := helper.DeleteWorkByRBNamespaceAndName(c.Client, req.Namespace, req.Name); err != nil {
+		if err := helper.DeleteWorks(ctx, c.Client, req.Namespace, req.Name, binding.Labels[workv1alpha2.ResourceBindingPermanentIDLabel]); err != nil {
 			klog.Errorf("Failed to delete works related to %s/%s: %v", binding.GetNamespace(), binding.GetName(), err)
-			return controllerruntime.Result{Requeue: true}, err
+			return controllerruntime.Result{}, err
 		}
-		return c.removeFinalizer(binding)
+		return c.removeFinalizer(ctx, binding)
 	}
 
-	return c.syncBinding(binding)
+	return c.syncBinding(ctx, binding)
 }
 
 // removeFinalizer removes finalizer from the given ResourceBinding
-func (c *ResourceBindingController) removeFinalizer(rb *workv1alpha2.ResourceBinding) (controllerruntime.Result, error) {
+func (c *ResourceBindingController) removeFinalizer(ctx context.Context, rb *workv1alpha2.ResourceBinding) (controllerruntime.Result, error) {
 	if !controllerutil.ContainsFinalizer(rb, util.BindingControllerFinalizer) {
 		return controllerruntime.Result{}, nil
 	}
 
 	controllerutil.RemoveFinalizer(rb, util.BindingControllerFinalizer)
-	err := c.Client.Update(context.TODO(), rb)
+	err := c.Client.Update(ctx, rb)
 	if err != nil {
-		return controllerruntime.Result{Requeue: true}, err
+		return controllerruntime.Result{}, err
 	}
 	return controllerruntime.Result{}, nil
 }
 
 // syncBinding will sync resourceBinding to Works.
-func (c *ResourceBindingController) syncBinding(binding *workv1alpha2.ResourceBinding) (controllerruntime.Result, error) {
-	if err := c.removeOrphanWorks(binding); err != nil {
-		return controllerruntime.Result{Requeue: true}, err
+func (c *ResourceBindingController) syncBinding(ctx context.Context, binding *workv1alpha2.ResourceBinding) (controllerruntime.Result, error) {
+	if err := c.removeOrphanWorks(ctx, binding); err != nil {
+		return controllerruntime.Result{}, err
 	}
 
-	workload, err := helper.FetchWorkload(c.DynamicClient, c.InformerManager, c.RESTMapper, binding.Spec.Resource)
+	workload, err := helper.FetchResourceTemplate(ctx, c.DynamicClient, c.InformerManager, c.RESTMapper, binding.Spec.Resource)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			// It might happen when the resource template has been removed but the garbage collector hasn't removed
@@ -113,43 +122,29 @@ func (c *ResourceBindingController) syncBinding(binding *workv1alpha2.ResourceBi
 		}
 		klog.Errorf("Failed to fetch workload for resourceBinding(%s/%s). Error: %v.",
 			binding.GetNamespace(), binding.GetName(), err)
-		return controllerruntime.Result{Requeue: true}, err
+		return controllerruntime.Result{}, err
 	}
-	var errs []error
 	start := time.Now()
-	err = ensureWork(c.Client, c.ResourceInterpreter, workload, c.OverrideManager, binding, apiextensionsv1.NamespaceScoped)
-	metrics.ObserveSyncWorkLatency(binding.ObjectMeta, err, start)
+	err = ensureWork(ctx, c.Client, c.ResourceInterpreter, workload, c.OverrideManager, binding, apiextensionsv1.NamespaceScoped)
+	metrics.ObserveSyncWorkLatency(err, start)
 	if err != nil {
 		klog.Errorf("Failed to transform resourceBinding(%s/%s) to works. Error: %v.",
 			binding.GetNamespace(), binding.GetName(), err)
 		c.EventRecorder.Event(binding, corev1.EventTypeWarning, events.EventReasonSyncWorkFailed, err.Error())
 		c.EventRecorder.Event(workload, corev1.EventTypeWarning, events.EventReasonSyncWorkFailed, err.Error())
-		errs = append(errs, err)
-	} else {
-		msg := fmt.Sprintf("Sync work of resourceBinding(%s/%s) successful.", binding.Namespace, binding.Name)
-		klog.V(4).Infof(msg)
-		c.EventRecorder.Event(binding, corev1.EventTypeNormal, events.EventReasonSyncWorkSucceed, msg)
-		c.EventRecorder.Event(workload, corev1.EventTypeNormal, events.EventReasonSyncWorkSucceed, msg)
-	}
-	if err = helper.AggregateResourceBindingWorkStatus(c.Client, binding, workload, c.EventRecorder); err != nil {
-		klog.Errorf("Failed to aggregate workStatuses to resourceBinding(%s/%s). Error: %v.",
-			binding.GetNamespace(), binding.GetName(), err)
-		errs = append(errs, err)
-	}
-	if len(errs) > 0 {
-		return controllerruntime.Result{Requeue: true}, errors.NewAggregate(errs)
+		return controllerruntime.Result{}, err
 	}
 
-	err = c.updateResourceStatus(binding)
-	if err != nil {
-		return controllerruntime.Result{Requeue: true}, err
-	}
-
+	msg := fmt.Sprintf("Sync work of resourceBinding(%s/%s) successful.", binding.Namespace, binding.Name)
+	klog.V(4).Infof(msg)
+	c.EventRecorder.Event(binding, corev1.EventTypeNormal, events.EventReasonSyncWorkSucceed, msg)
+	c.EventRecorder.Event(workload, corev1.EventTypeNormal, events.EventReasonSyncWorkSucceed, msg)
 	return controllerruntime.Result{}, nil
 }
 
-func (c *ResourceBindingController) removeOrphanWorks(binding *workv1alpha2.ResourceBinding) error {
-	works, err := helper.FindOrphanWorks(c.Client, binding.Namespace, binding.Name, helper.ObtainBindingSpecExistingClusters(binding.Spec))
+func (c *ResourceBindingController) removeOrphanWorks(ctx context.Context, binding *workv1alpha2.ResourceBinding) error {
+	works, err := helper.FindOrphanWorks(ctx, c.Client, binding.Namespace, binding.Name,
+		binding.Labels[workv1alpha2.ResourceBindingPermanentIDLabel], helper.ObtainBindingSpecExistingClusters(binding.Spec))
 	if err != nil {
 		klog.Errorf("Failed to find orphan works by resourceBinding(%s/%s). Error: %v.",
 			binding.GetNamespace(), binding.GetName(), err)
@@ -157,7 +152,7 @@ func (c *ResourceBindingController) removeOrphanWorks(binding *workv1alpha2.Reso
 		return err
 	}
 
-	err = helper.RemoveOrphanWorks(c.Client, works)
+	err = helper.RemoveOrphanWorks(ctx, c.Client, works)
 	if err != nil {
 		klog.Errorf("Failed to remove orphan works by resourceBinding(%s/%s). Error: %v.",
 			binding.GetNamespace(), binding.GetName(), err)
@@ -168,76 +163,20 @@ func (c *ResourceBindingController) removeOrphanWorks(binding *workv1alpha2.Reso
 	return nil
 }
 
-// updateResourceStatus will try to calculate the summary status and update to original object
-// that the ResourceBinding refer to.
-func (c *ResourceBindingController) updateResourceStatus(binding *workv1alpha2.ResourceBinding) error {
-	resource := binding.Spec.Resource
-	gvr, err := restmapper.GetGroupVersionResource(
-		c.RESTMapper, schema.FromAPIVersionAndKind(resource.APIVersion, resource.Kind),
-	)
-	if err != nil {
-		klog.Errorf("Failed to get GVR from GVK %s %s. Error: %v", resource.APIVersion, resource.Kind, err)
-		return err
-	}
-	obj, err := helper.FetchWorkload(c.DynamicClient, c.InformerManager, c.RESTMapper, resource)
-	if err != nil {
-		klog.Errorf("Failed to get resource(%s/%s/%s), Error: %v", resource.Kind, resource.Namespace, resource.Name, err)
-		return err
-	}
-
-	if !c.ResourceInterpreter.HookEnabled(obj.GroupVersionKind(), configv1alpha1.InterpreterOperationAggregateStatus) {
-		return nil
-	}
-	newObj, err := c.ResourceInterpreter.AggregateStatus(obj, binding.Status.AggregatedStatus)
-	if err != nil {
-		klog.Errorf("AggregateStatus for resource(%s/%s/%s) failed: %v", resource.Kind, resource.Namespace, resource.Name, err)
-		return err
-	}
-	if reflect.DeepEqual(obj, newObj) {
-		klog.V(3).Infof("Ignore update resource(%s/%s/%s) status as up to date", resource.Kind, resource.Namespace, resource.Name)
-		return nil
-	}
-
-	if _, err = c.DynamicClient.Resource(gvr).Namespace(resource.Namespace).UpdateStatus(context.TODO(), newObj, metav1.UpdateOptions{}); err != nil {
-		klog.Errorf("Failed to update resource(%s/%s/%s), Error: %v", resource.Kind, resource.Namespace, resource.Name, err)
-		return err
-	}
-	klog.V(3).Infof("Update resource status successfully for resource(%s/%s/%s)", resource.Kind, resource.Namespace, resource.Name)
-	return nil
-}
-
 // SetupWithManager creates a controller and register to controller manager.
 func (c *ResourceBindingController) SetupWithManager(mgr controllerruntime.Manager) error {
-	workFn := handler.MapFunc(
-		func(a client.Object) []reconcile.Request {
-			var requests []reconcile.Request
-			annotations := a.GetAnnotations()
-			crNamespace, namespaceExist := annotations[workv1alpha2.ResourceBindingNamespaceAnnotationKey]
-			crName, nameExist := annotations[workv1alpha2.ResourceBindingNameAnnotationKey]
-			if namespaceExist && nameExist {
-				requests = append(requests, reconcile.Request{
-					NamespacedName: types.NamespacedName{
-						Namespace: crNamespace,
-						Name:      crName,
-					},
-				})
-			}
-
-			return requests
-		})
-
-	return controllerruntime.NewControllerManagedBy(mgr).For(&workv1alpha2.ResourceBinding{}).
-		Watches(&source.Kind{Type: &workv1alpha1.Work{}}, handler.EnqueueRequestsFromMapFunc(workFn), workPredicateFn).
-		Watches(&source.Kind{Type: &policyv1alpha1.OverridePolicy{}}, handler.EnqueueRequestsFromMapFunc(c.newOverridePolicyFunc())).
-		Watches(&source.Kind{Type: &policyv1alpha1.ClusterOverridePolicy{}}, handler.EnqueueRequestsFromMapFunc(c.newOverridePolicyFunc())).
-		WithOptions(controller.Options{
-			RateLimiter: ratelimiterflag.DefaultControllerRateLimiter(c.RateLimiterOptions),
-		}).
+	return controllerruntime.NewControllerManagedBy(mgr).
+		Named(ControllerName).
+		For(&workv1alpha2.ResourceBinding{}).
+		WithEventFilter(predicate.GenerationChangedPredicate{}).
+		Watches(&policyv1alpha1.OverridePolicy{}, handler.EnqueueRequestsFromMapFunc(c.newOverridePolicyFunc())).
+		Watches(&policyv1alpha1.ClusterOverridePolicy{}, handler.EnqueueRequestsFromMapFunc(c.newOverridePolicyFunc())).
+		WithOptions(controller.Options{RateLimiter: ratelimiterflag.DefaultControllerRateLimiter[controllerruntime.Request](c.RateLimiterOptions)}).
 		Complete(c)
 }
 
 func (c *ResourceBindingController) newOverridePolicyFunc() handler.MapFunc {
-	return func(a client.Object) []reconcile.Request {
+	return func(ctx context.Context, a client.Object) []reconcile.Request {
 		var overrideRS []policyv1alpha1.ResourceSelector
 		var namespace string
 		switch t := a.(type) {
@@ -251,7 +190,7 @@ func (c *ResourceBindingController) newOverridePolicyFunc() handler.MapFunc {
 		}
 
 		bindingList := &workv1alpha2.ResourceBindingList{}
-		if err := c.Client.List(context.TODO(), bindingList); err != nil {
+		if err := c.Client.List(ctx, bindingList); err != nil {
 			klog.Errorf("Failed to list resourceBindings, error: %v", err)
 			return nil
 		}
@@ -270,10 +209,12 @@ func (c *ResourceBindingController) newOverridePolicyFunc() handler.MapFunc {
 				continue
 			}
 
-			workload, err := helper.FetchWorkload(c.DynamicClient, c.InformerManager, c.RESTMapper, binding.Spec.Resource)
+			workload, err := helper.FetchResourceTemplate(ctx, c.DynamicClient, c.InformerManager, c.RESTMapper, binding.Spec.Resource)
 			if err != nil {
+				// If we cannot fetch resource template from binding, this may be due to the fact that the resource template has been deleted.
+				// Just skip it so that it will not affect other bindings.
 				klog.Errorf("Failed to fetch workload for resourceBinding(%s/%s). Error: %v.", binding.Namespace, binding.Name, err)
-				return nil
+				continue
 			}
 
 			for _, rs := range overrideRS {

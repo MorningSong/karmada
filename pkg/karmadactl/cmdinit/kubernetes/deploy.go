@@ -1,3 +1,19 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package kubernetes
 
 import (
@@ -7,6 +23,7 @@ import (
 	"net"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -20,11 +37,14 @@ import (
 	netutils "k8s.io/utils/net"
 
 	"github.com/karmada-io/karmada/pkg/karmadactl/cmdinit/cert"
+	initConfig "github.com/karmada-io/karmada/pkg/karmadactl/cmdinit/config"
 	"github.com/karmada-io/karmada/pkg/karmadactl/cmdinit/karmada"
 	"github.com/karmada-io/karmada/pkg/karmadactl/cmdinit/options"
 	"github.com/karmada-io/karmada/pkg/karmadactl/cmdinit/utils"
+	globaloptions "github.com/karmada-io/karmada/pkg/karmadactl/options"
 	"github.com/karmada-io/karmada/pkg/karmadactl/util"
 	"github.com/karmada-io/karmada/pkg/karmadactl/util/apiclient"
+	"github.com/karmada-io/karmada/pkg/util/validation"
 	"github.com/karmada-io/karmada/pkg/version"
 )
 
@@ -35,7 +55,7 @@ var (
 	}
 
 	certList = []string{
-		options.CaCertAndKeyName,
+		globaloptions.CaCertAndKeyName,
 		options.EtcdCaCertAndKeyName,
 		options.EtcdServerCertAndKeyName,
 		options.EtcdClientCertAndKeyName,
@@ -45,9 +65,28 @@ var (
 		options.FrontProxyClientCertAndKeyName,
 	}
 
+	emptyByteSlice                 = make([]byte, 0)
+	externalEtcdCertSpecialization = map[string]func(*CommandInitOption) ([]byte, []byte, error){
+		options.EtcdCaCertAndKeyName: func(option *CommandInitOption) (cert, key []byte, err error) {
+			cert, err = os.ReadFile(option.ExternalEtcdCACertPath)
+			key = emptyByteSlice
+			return
+		},
+		options.EtcdServerCertAndKeyName: func(_ *CommandInitOption) ([]byte, []byte, error) {
+			return emptyByteSlice, emptyByteSlice, nil
+		},
+		options.EtcdClientCertAndKeyName: func(option *CommandInitOption) (cert, key []byte, err error) {
+			if cert, err = os.ReadFile(option.ExternalEtcdClientCertPath); err != nil {
+				return
+			}
+			key, err = os.ReadFile(option.ExternalEtcdClientKeyPath)
+			return
+		},
+	}
+
 	karmadaRelease string
 
-	defaultEtcdImage = "etcd:3.5.3-0"
+	defaultEtcdImage = "etcd:3.5.16-0"
 
 	// DefaultCrdURL Karmada crds resource
 	DefaultCrdURL string
@@ -57,8 +96,8 @@ var (
 	DefaultKarmadaSchedulerImage string
 	// DefaultKarmadaControllerManagerImage Karmada controller manager image
 	DefaultKarmadaControllerManagerImage string
-	// DefualtKarmadaWebhookImage Karmada webhook image
-	DefualtKarmadaWebhookImage string
+	// DefaultKarmadaWebhookImage Karmada webhook image
+	DefaultKarmadaWebhookImage string
 	// DefaultKarmadaAggregatedAPIServerImage Karmada aggregated apiserver image
 	DefaultKarmadaAggregatedAPIServerImage string
 )
@@ -75,19 +114,20 @@ func init() {
 		klog.Infof("No default release version found. build version: %s", version.Get().String())
 		releaseVer = &version.ReleaseVersion{} // initialize to avoid panic
 	}
-	karmadaRelease = releaseVer.PatchRelease()
+	karmadaRelease = releaseVer.ReleaseVersion()
 
-	DefaultCrdURL = fmt.Sprintf("https://github.com/karmada-io/karmada/releases/download/%s/crds.tar.gz", releaseVer.FirstMinorRelease())
-	DefaultInitImage = "docker.io/alpine:3.15.1"
-	DefaultKarmadaSchedulerImage = fmt.Sprintf("docker.io/karmada/karmada-scheduler:%s", releaseVer.PatchRelease())
-	DefaultKarmadaControllerManagerImage = fmt.Sprintf("docker.io/karmada/karmada-controller-manager:%s", releaseVer.PatchRelease())
-	DefualtKarmadaWebhookImage = fmt.Sprintf("docker.io/karmada/karmada-webhook:%s", releaseVer.PatchRelease())
-	DefaultKarmadaAggregatedAPIServerImage = fmt.Sprintf("docker.io/karmada/karmada-aggregated-apiserver:%s", releaseVer.PatchRelease())
+	DefaultCrdURL = fmt.Sprintf("https://github.com/karmada-io/karmada/releases/download/%s/crds.tar.gz", releaseVer.ReleaseVersion())
+	DefaultInitImage = "docker.io/alpine:3.21.0"
+	DefaultKarmadaSchedulerImage = fmt.Sprintf("docker.io/karmada/karmada-scheduler:%s", releaseVer.ReleaseVersion())
+	DefaultKarmadaControllerManagerImage = fmt.Sprintf("docker.io/karmada/karmada-controller-manager:%s", releaseVer.ReleaseVersion())
+	DefaultKarmadaWebhookImage = fmt.Sprintf("docker.io/karmada/karmada-webhook:%s", releaseVer.ReleaseVersion())
+	DefaultKarmadaAggregatedAPIServerImage = fmt.Sprintf("docker.io/karmada/karmada-aggregated-apiserver:%s", releaseVer.ReleaseVersion())
 }
 
 // CommandInitOption holds all flags options for init.
 type CommandInitOption struct {
 	ImageRegistry                      string
+	ImagePullPolicy                    string
 	KubeImageRegistry                  string
 	KubeImageMirrorCountry             string
 	KubeImageTag                       string
@@ -97,7 +137,13 @@ type CommandInitOption struct {
 	EtcdStorageMode                    string
 	EtcdHostDataPath                   string
 	EtcdNodeSelectorLabels             string
+	EtcdNodeSelectorLabelsMap          map[string]string
 	EtcdPersistentVolumeSize           string
+	ExternalEtcdCACertPath             string
+	ExternalEtcdClientCertPath         string
+	ExternalEtcdClientKeyPath          string
+	ExternalEtcdServers                string
+	ExternalEtcdKeyPrefix              string
 	KarmadaAPIServerImage              string
 	KarmadaAPIServerReplicas           int32
 	KarmadaAPIServerAdvertiseAddress   string
@@ -121,26 +167,22 @@ type CommandInitOption struct {
 	CRDs                               string
 	ExternalIP                         string
 	ExternalDNS                        string
+	PullSecrets                        []string
+	CertValidity                       time.Duration
 	KubeClientSet                      kubernetes.Interface
 	CertAndKeyFileData                 map[string][]byte
 	RestConfig                         *rest.Config
 	KarmadaAPIServerIP                 []net.IP
+	HostClusterDomain                  string
+	WaitComponentReadyTimeout          int
+	CaCertFile                         string
+	CaKeyFile                          string
+	KarmadaInitFilePath                string
 }
 
-// Validate Check that there are enough flags to run the command.
-func (i *CommandInitOption) Validate(parentCommand string) error {
-	if i.KarmadaAPIServerAdvertiseAddress != "" {
-		if netutils.ParseIPSloppy(i.KarmadaAPIServerAdvertiseAddress) == nil {
-			return fmt.Errorf("karmada apiserver advertise address is not valid")
-		}
-	}
-
+func (i *CommandInitOption) validateLocalEtcd(parentCommand string) error {
 	if i.EtcdStorageMode == etcdStorageModeHostPath && i.EtcdHostDataPath == "" {
 		return fmt.Errorf("when etcd storage mode is hostPath, dataPath is not empty. See '%s init --help'", parentCommand)
-	}
-
-	if i.EtcdStorageMode == etcdStorageModeHostPath && i.EtcdNodeSelectorLabels != "" && utils.StringToMap(i.EtcdNodeSelectorLabels) == nil {
-		return fmt.Errorf("the label does not seem to be 'key=value'")
 	}
 
 	if i.EtcdStorageMode == etcdStorageModeHostPath && i.EtcdReplicas != 1 {
@@ -149,6 +191,10 @@ func (i *CommandInitOption) Validate(parentCommand string) error {
 
 	if i.EtcdStorageMode == etcdStorageModePVC && i.StorageClassesName == "" {
 		return fmt.Errorf("when etcd storage mode is PVC, storageClassesName is not empty. See '%s init --help'", parentCommand)
+	}
+
+	if i.WaitComponentReadyTimeout < 0 {
+		return fmt.Errorf("wait-component-ready-timeout must be greater than or equal to 0")
 	}
 
 	supportedStorageMode := SupportedStorageMode()
@@ -161,6 +207,52 @@ func (i *CommandInitOption) Validate(parentCommand string) error {
 		return fmt.Errorf("unsupported etcd-storage-mode %s. See '%s init --help'", i.EtcdStorageMode, parentCommand)
 	}
 	return nil
+}
+
+func (i *CommandInitOption) validateExternalEtcd(_ string) error {
+	if (i.ExternalEtcdClientCertPath == "" && i.ExternalEtcdClientKeyPath != "") ||
+		(i.ExternalEtcdClientCertPath != "" && i.ExternalEtcdClientKeyPath == "") {
+		return fmt.Errorf("etcd client cert and key should be specified both or none")
+	}
+	return nil
+}
+
+func (i *CommandInitOption) isExternalEtcdProvided() bool {
+	return i.ExternalEtcdServers != ""
+}
+
+// Validate Check that there are enough flags to run the command.
+func (i *CommandInitOption) Validate(parentCommand string) error {
+	if i.KarmadaInitFilePath != "" {
+		cfg, err := initConfig.LoadInitConfiguration(i.KarmadaInitFilePath)
+		if err != nil {
+			return fmt.Errorf("failed to load karmada init configuration: %v", err)
+		}
+		if err := i.parseInitConfig(cfg); err != nil {
+			return fmt.Errorf("failed to parse karmada init configuration: %v", err)
+		}
+	}
+
+	if i.KarmadaAPIServerAdvertiseAddress != "" {
+		if netutils.ParseIPSloppy(i.KarmadaAPIServerAdvertiseAddress) == nil {
+			return fmt.Errorf("karmada apiserver advertise address is not valid")
+		}
+	}
+	if (i.CaCertFile != "") != (i.CaKeyFile != "") {
+		return fmt.Errorf("ca-cert-file and ca-key-file must be used together")
+	}
+
+	switch i.ImagePullPolicy {
+	case string(corev1.PullAlways), string(corev1.PullIfNotPresent), string(corev1.PullNever):
+		// continue
+	default:
+		return fmt.Errorf("invalid image pull policy: %s", i.ImagePullPolicy)
+	}
+
+	if i.isExternalEtcdProvided() {
+		return i.validateExternalEtcd(parentCommand)
+	}
+	return i.validateLocalEtcd(parentCommand)
 }
 
 // Complete Initialize k8s client
@@ -182,7 +274,7 @@ func (i *CommandInitOption) Complete() error {
 		return fmt.Errorf("nodePort of karmada apiserver %v already exist", i.KarmadaAPIServerNodePort)
 	}
 
-	if i.EtcdStorageMode == "hostPath" && i.EtcdNodeSelectorLabels == "" {
+	if !i.isExternalEtcdProvided() && i.EtcdStorageMode == "hostPath" && i.EtcdNodeSelectorLabels == "" {
 		if err := i.AddNodeSelectorLabels(); err != nil {
 			return err
 		}
@@ -193,12 +285,18 @@ func (i *CommandInitOption) Complete() error {
 	}
 	klog.Infof("karmada apiserver ip: %s", i.KarmadaAPIServerIP)
 
-	if i.EtcdStorageMode == "hostPath" && i.EtcdNodeSelectorLabels != "" {
-		if !i.isNodeExist(i.EtcdNodeSelectorLabels) {
-			return fmt.Errorf("no node found by label %s", i.EtcdNodeSelectorLabels)
-		}
+	if err := i.handleEtcdNodeSelectorLabels(); err != nil {
+		return err
 	}
 
+	if !i.isExternalEtcdProvided() && i.EtcdStorageMode == "hostPath" && i.EtcdNodeSelectorLabels != "" {
+		labels := strings.Split(i.EtcdNodeSelectorLabels, ",")
+		for _, label := range labels {
+			if !i.isNodeExist(label) {
+				return fmt.Errorf("no node found by label %s", label)
+			}
+		}
+	}
 	return initializeDirectory(i.KarmadaDataPath)
 }
 
@@ -209,7 +307,7 @@ func initializeDirectory(path string) error {
 			return err
 		}
 	}
-	if err := os.MkdirAll(path, os.FileMode(0o755)); err != nil {
+	if err := os.MkdirAll(path, os.FileMode(0700)); err != nil {
 		return fmt.Errorf("failed to create directory: %s, error: %v", path, err)
 	}
 
@@ -218,20 +316,24 @@ func initializeDirectory(path string) error {
 
 // genCerts create ca etcd karmada cert
 func (i *CommandInitOption) genCerts() error {
-	notAfter := time.Now().Add(cert.Duration365d).UTC()
+	notAfter := time.Now().Add(i.CertValidity).UTC()
 
-	etcdServerCertDNS := []string{
-		"localhost",
+	var etcdServerCertConfig, etcdClientCertCfg *cert.CertsConfig
+	if !i.isExternalEtcdProvided() {
+		etcdServerCertDNS := []string{
+			"localhost",
+		}
+		for number := int32(0); number < i.EtcdReplicas; number++ {
+			etcdServerCertDNS = append(etcdServerCertDNS, fmt.Sprintf("%s-%v.%s.%s.svc.%s",
+				etcdStatefulSetAndServiceName, number, etcdStatefulSetAndServiceName, i.Namespace, i.HostClusterDomain))
+		}
+		etcdServerAltNames := certutil.AltNames{
+			DNSNames: etcdServerCertDNS,
+			IPs:      []net.IP{utils.StringToNetIP("127.0.0.1")},
+		}
+		etcdServerCertConfig = cert.NewCertConfig("karmada-etcd-server", []string{}, etcdServerAltNames, &notAfter)
+		etcdClientCertCfg = cert.NewCertConfig("karmada-etcd-client", []string{}, certutil.AltNames{}, &notAfter)
 	}
-	for number := int32(0); number < i.EtcdReplicas; number++ {
-		etcdServerCertDNS = append(etcdServerCertDNS, fmt.Sprintf("%s-%v.%s.%s.svc.cluster.local", etcdStatefulSetAndServiceName, number, etcdStatefulSetAndServiceName, i.Namespace))
-	}
-	etcdServerAltNames := certutil.AltNames{
-		DNSNames: etcdServerCertDNS,
-		IPs:      []net.IP{utils.StringToNetIP("127.0.0.1")},
-	}
-	etcdServerCertConfig := cert.NewCertConfig("karmada-etcd-server", []string{}, etcdServerAltNames, &notAfter)
-	etcdClientCertCfg := cert.NewCertConfig("karmada-etcd-client", []string{}, certutil.AltNames{}, &notAfter)
 
 	karmadaDNS := []string{
 		"localhost",
@@ -241,11 +343,11 @@ func (i *CommandInitOption) genCerts() error {
 		karmadaAPIServerDeploymentAndServiceName,
 		webhookDeploymentAndServiceAccountAndServiceName,
 		karmadaAggregatedAPIServerDeploymentAndServiceName,
-		fmt.Sprintf("%s.%s.svc.cluster.local", karmadaAPIServerDeploymentAndServiceName, i.Namespace),
-		fmt.Sprintf("%s.%s.svc.cluster.local", webhookDeploymentAndServiceAccountAndServiceName, i.Namespace),
+		fmt.Sprintf("%s.%s.svc.%s", karmadaAPIServerDeploymentAndServiceName, i.Namespace, i.HostClusterDomain),
+		fmt.Sprintf("%s.%s.svc.%s", webhookDeploymentAndServiceAccountAndServiceName, i.Namespace, i.HostClusterDomain),
 		fmt.Sprintf("%s.%s.svc", webhookDeploymentAndServiceAccountAndServiceName, i.Namespace),
-		fmt.Sprintf("%s.%s.svc.cluster.local", karmadaAggregatedAPIServerDeploymentAndServiceName, i.Namespace),
-		fmt.Sprintf("*.%s.svc.cluster.local", i.Namespace),
+		fmt.Sprintf("%s.%s.svc.%s", karmadaAggregatedAPIServerDeploymentAndServiceName, i.Namespace, i.HostClusterDomain),
+		fmt.Sprintf("*.%s.svc.%s", i.Namespace, i.HostClusterDomain),
 		fmt.Sprintf("*.%s.svc", i.Namespace),
 	}
 	karmadaDNS = append(karmadaDNS, utils.FlagsDNS(i.ExternalDNS)...)
@@ -254,7 +356,6 @@ func (i *CommandInitOption) genCerts() error {
 	karmadaIPs = append(
 		karmadaIPs,
 		utils.StringToNetIP("127.0.0.1"),
-		utils.StringToNetIP("10.254.0.1"),
 	)
 	karmadaIPs = append(karmadaIPs, i.KarmadaAPIServerIP...)
 
@@ -274,7 +375,7 @@ func (i *CommandInitOption) genCerts() error {
 	apiserverCertCfg := cert.NewCertConfig("karmada-apiserver", []string{""}, karmadaAltNames, &notAfter)
 
 	frontProxyClientCertCfg := cert.NewCertConfig("front-proxy-client", []string{}, certutil.AltNames{}, &notAfter)
-	if err = cert.GenCerts(i.KarmadaPkiPath, etcdServerCertConfig, etcdClientCertCfg, karmadaCertCfg, apiserverCertCfg, frontProxyClientCertCfg); err != nil {
+	if err = cert.GenCerts(i.KarmadaPkiPath, i.CaCertFile, i.CaKeyFile, etcdServerCertConfig, etcdClientCertCfg, karmadaCertCfg, apiserverCertCfg, frontProxyClientCertCfg); err != nil {
 		return err
 	}
 	return nil
@@ -282,25 +383,40 @@ func (i *CommandInitOption) genCerts() error {
 
 // prepareCRD download or unzip `crds.tar.gz` to `options.DataPath`
 func (i *CommandInitOption) prepareCRD() error {
+	var filename string
 	if strings.HasPrefix(i.CRDs, "http") {
-		filename := i.KarmadaDataPath + "/" + path.Base(i.CRDs)
+		filename = i.KarmadaDataPath + "/" + path.Base(i.CRDs)
 		klog.Infof("download crds file:%s", i.CRDs)
 		if err := utils.DownloadFile(i.CRDs, filename); err != nil {
 			return err
 		}
-		if err := utils.DeCompress(filename, i.KarmadaDataPath); err != nil {
-			return err
-		}
-		return nil
+	} else {
+		filename = i.CRDs
+		klog.Infoln("local crds file name:", i.CRDs)
 	}
-	klog.Infoln("local crds file name:", i.CRDs)
-	return utils.DeCompress(i.CRDs, i.KarmadaDataPath)
+
+	if err := validation.ValidateTarball(filename, validation.ValidateCrdsTarBall); err != nil {
+		return fmt.Errorf("inValid crd tar, err: %w", err)
+	}
+
+	if err := utils.DeCompress(filename, i.KarmadaDataPath); err != nil {
+		return err
+	}
+
+	for _, archive := range validation.CrdsArchive {
+		expectedDir := filepath.Join(i.KarmadaDataPath, archive)
+		exist, _ := utils.PathExists(expectedDir)
+		if !exist {
+			return fmt.Errorf("lacking the necessary file path: %s", expectedDir)
+		}
+	}
+	return nil
 }
 
 func (i *CommandInitOption) createCertsSecrets() error {
 	// Create kubeconfig Secret
-	karmadaServerURL := fmt.Sprintf("https://%s.%s.svc.cluster.local:%v", karmadaAPIServerDeploymentAndServiceName, i.Namespace, karmadaAPIServerContainerPort)
-	config := utils.CreateWithCerts(karmadaServerURL, options.UserName, options.UserName, i.CertAndKeyFileData[fmt.Sprintf("%s.crt", options.CaCertAndKeyName)],
+	karmadaServerURL := fmt.Sprintf("https://%s.%s.svc.%s:%v", karmadaAPIServerDeploymentAndServiceName, i.Namespace, i.HostClusterDomain, karmadaAPIServerContainerPort)
+	config := utils.CreateWithCerts(karmadaServerURL, options.UserName, options.UserName, i.CertAndKeyFileData[fmt.Sprintf("%s.crt", globaloptions.CaCertAndKeyName)],
 		i.CertAndKeyFileData[fmt.Sprintf("%s.key", options.KarmadaCertAndKeyName)], i.CertAndKeyFileData[fmt.Sprintf("%s.crt", options.KarmadaCertAndKeyName)])
 	configBytes, err := clientcmd.Write(*config)
 	if err != nil {
@@ -328,7 +444,7 @@ func (i *CommandInitOption) createCertsSecrets() error {
 		karmadaCert[fmt.Sprintf("%s.crt", v)] = string(i.CertAndKeyFileData[fmt.Sprintf("%s.crt", v)])
 		karmadaCert[fmt.Sprintf("%s.key", v)] = string(i.CertAndKeyFileData[fmt.Sprintf("%s.key", v)])
 	}
-	karmadaSecret := i.SecretFromSpec(karmadaCertsName, corev1.SecretTypeOpaque, karmadaCert)
+	karmadaSecret := i.SecretFromSpec(globaloptions.KarmadaCertsName, corev1.SecretTypeOpaque, karmadaCert)
 	if err := util.CreateOrUpdateSecret(i.KubeClientSet, karmadaSecret); err != nil {
 		return err
 	}
@@ -346,28 +462,26 @@ func (i *CommandInitOption) createCertsSecrets() error {
 }
 
 func (i *CommandInitOption) initKarmadaAPIServer() error {
-	if err := util.CreateOrUpdateService(i.KubeClientSet, i.makeEtcdService(etcdStatefulSetAndServiceName)); err != nil {
-		return err
+	if !i.isExternalEtcdProvided() {
+		if err := util.CreateOrUpdateService(i.KubeClientSet, i.makeEtcdService(etcdStatefulSetAndServiceName)); err != nil {
+			return err
+		}
+		klog.Info("Create etcd StatefulSets")
+		etcdStatefulSet := i.makeETCDStatefulSet()
+		if _, err := i.KubeClientSet.AppsV1().StatefulSets(i.Namespace).Create(context.TODO(), etcdStatefulSet, metav1.CreateOptions{}); err != nil {
+			klog.Warning(err)
+		}
+		if err := util.WaitForStatefulSetRollout(i.KubeClientSet, etcdStatefulSet, i.WaitComponentReadyTimeout); err != nil {
+			klog.Warning(err)
+		}
 	}
-	klog.Info("Create etcd StatefulSets")
-	if _, err := i.KubeClientSet.AppsV1().StatefulSets(i.Namespace).Create(context.TODO(), i.makeETCDStatefulSet(), metav1.CreateOptions{}); err != nil {
-		klog.Warning(err)
-	}
-	if err := WaitEtcdReplicasetInDesired(i.EtcdReplicas, i.KubeClientSet, i.Namespace, utils.MapToString(etcdLabels), 30); err != nil {
-		klog.Warning(err)
-	}
-	if err := WaitPodReady(i.KubeClientSet, i.Namespace, utils.MapToString(etcdLabels), 30); err != nil {
-		klog.Warning(err)
-	}
-
 	klog.Info("Create karmada ApiServer Deployment")
 	if err := util.CreateOrUpdateService(i.KubeClientSet, i.makeKarmadaAPIServerService()); err != nil {
 		return err
 	}
-	if _, err := i.KubeClientSet.AppsV1().Deployments(i.Namespace).Create(context.TODO(), i.makeKarmadaAPIServerDeployment(), metav1.CreateOptions{}); err != nil {
-		klog.Warning(err)
-	}
-	if err := WaitPodReady(i.KubeClientSet, i.Namespace, utils.MapToString(apiServerLabels), 120); err != nil {
+
+	karmadaAPIServerDeployment := i.makeKarmadaAPIServerDeployment()
+	if err := utils.CreateDeployAndWait(i.KubeClientSet, karmadaAPIServerDeployment, i.WaitComponentReadyTimeout); err != nil {
 		return err
 	}
 
@@ -377,50 +491,39 @@ func (i *CommandInitOption) initKarmadaAPIServer() error {
 	if err := util.CreateOrUpdateService(i.KubeClientSet, i.karmadaAggregatedAPIServerService()); err != nil {
 		klog.Exitln(err)
 	}
-	if _, err := i.KubeClientSet.AppsV1().Deployments(i.Namespace).Create(context.TODO(), i.makeKarmadaAggregatedAPIServerDeployment(), metav1.CreateOptions{}); err != nil {
-		klog.Warning(err)
-	}
-	if err := WaitPodReady(i.KubeClientSet, i.Namespace, utils.MapToString(aggregatedAPIServerLabels), 30); err != nil {
+	karmadaAggregatedAPIServerDeployment := i.makeKarmadaAggregatedAPIServerDeployment()
+	if err := utils.CreateDeployAndWait(i.KubeClientSet, karmadaAggregatedAPIServerDeployment, i.WaitComponentReadyTimeout); err != nil {
 		klog.Warning(err)
 	}
 	return nil
 }
 
 func (i *CommandInitOption) initKarmadaComponent() error {
-	// wait pod ready timeout 30s
-	waitPodReadyTimeout := 30
-
-	deploymentClient := i.KubeClientSet.AppsV1().Deployments(i.Namespace)
 	// Create karmada-kube-controller-manager
 	// https://github.com/karmada-io/karmada/blob/master/artifacts/deploy/kube-controller-manager.yaml
 	klog.Info("Create karmada kube controller manager Deployment")
 	if err := util.CreateOrUpdateService(i.KubeClientSet, i.kubeControllerManagerService()); err != nil {
 		klog.Exitln(err)
 	}
-	if _, err := deploymentClient.Create(context.TODO(), i.makeKarmadaKubeControllerManagerDeployment(), metav1.CreateOptions{}); err != nil {
-		klog.Warning(err)
-	}
-	if err := WaitPodReady(i.KubeClientSet, i.Namespace, utils.MapToString(kubeControllerManagerLabels), waitPodReadyTimeout); err != nil {
+
+	karmadaKubeControllerManagerDeployment := i.makeKarmadaKubeControllerManagerDeployment()
+	if err := utils.CreateDeployAndWait(i.KubeClientSet, karmadaKubeControllerManagerDeployment, i.WaitComponentReadyTimeout); err != nil {
 		klog.Warning(err)
 	}
 
 	// Create karmada-scheduler
 	// https://github.com/karmada-io/karmada/blob/master/artifacts/deploy/karmada-scheduler.yaml
 	klog.Info("Create karmada scheduler Deployment")
-	if _, err := deploymentClient.Create(context.TODO(), i.makeKarmadaSchedulerDeployment(), metav1.CreateOptions{}); err != nil {
-		klog.Warning(err)
-	}
-	if err := WaitPodReady(i.KubeClientSet, i.Namespace, utils.MapToString(schedulerLabels), waitPodReadyTimeout); err != nil {
+	karmadaSchedulerDeployment := i.makeKarmadaSchedulerDeployment()
+	if err := utils.CreateDeployAndWait(i.KubeClientSet, karmadaSchedulerDeployment, i.WaitComponentReadyTimeout); err != nil {
 		klog.Warning(err)
 	}
 
 	// Create karmada-controller-manager
 	// https://github.com/karmada-io/karmada/blob/master/artifacts/deploy/karmada-controller-manager.yaml
 	klog.Info("Create karmada controller manager Deployment")
-	if _, err := deploymentClient.Create(context.TODO(), i.makeKarmadaControllerManagerDeployment(), metav1.CreateOptions{}); err != nil {
-		klog.Warning(err)
-	}
-	if err := WaitPodReady(i.KubeClientSet, i.Namespace, utils.MapToString(controllerManagerLabels), waitPodReadyTimeout); err != nil {
+	karmadaControllerManagerDeployment := i.makeKarmadaControllerManagerDeployment()
+	if err := utils.CreateDeployAndWait(i.KubeClientSet, karmadaControllerManagerDeployment, i.WaitComponentReadyTimeout); err != nil {
 		klog.Warning(err)
 	}
 
@@ -430,13 +533,27 @@ func (i *CommandInitOption) initKarmadaComponent() error {
 	if err := util.CreateOrUpdateService(i.KubeClientSet, i.karmadaWebhookService()); err != nil {
 		klog.Exitln(err)
 	}
-	if _, err := deploymentClient.Create(context.TODO(), i.makeKarmadaWebhookDeployment(), metav1.CreateOptions{}); err != nil {
-		klog.Warning(err)
-	}
-	if err := WaitPodReady(i.KubeClientSet, i.Namespace, utils.MapToString(webhookLabels), waitPodReadyTimeout); err != nil {
+	karmadaWebhookDeployment := i.makeKarmadaWebhookDeployment()
+	if err := utils.CreateDeployAndWait(i.KubeClientSet, karmadaWebhookDeployment, i.WaitComponentReadyTimeout); err != nil {
 		klog.Warning(err)
 	}
 	return nil
+}
+
+func (i *CommandInitOption) readExternalEtcdCert(name string) (isExternalEtcdCert bool, err error) {
+	if !i.isExternalEtcdProvided() {
+		return
+	}
+	var getCertAndKey func(*CommandInitOption) ([]byte, []byte, error)
+	if getCertAndKey, isExternalEtcdCert = externalEtcdCertSpecialization[name]; isExternalEtcdCert {
+		var certs, key []byte
+		if certs, key, err = getCertAndKey(i); err != nil {
+			return
+		}
+		i.CertAndKeyFileData[fmt.Sprintf("%s.crt", name)] = certs
+		i.CertAndKeyFileData[fmt.Sprintf("%s.key", name)] = key
+	}
+	return
 }
 
 // RunInit Deploy karmada in kubernetes
@@ -449,6 +566,11 @@ func (i *CommandInitOption) RunInit(parentCommand string) error {
 	i.CertAndKeyFileData = map[string][]byte{}
 
 	for _, v := range certList {
+		if isExternalEtcdCert, err := i.readExternalEtcdCert(v); err != nil {
+			return fmt.Errorf("read external etcd certificate failed, %s. %v", v, err)
+		} else if isExternalEtcdCert {
+			continue
+		}
 		certs, err := utils.FileToBytes(i.KarmadaPkiPath, fmt.Sprintf("%s.crt", v))
 		if err != nil {
 			return fmt.Errorf("'%s.crt' conversion failed. %v", v, err)
@@ -489,14 +611,8 @@ func (i *CommandInitOption) RunInit(parentCommand string) error {
 	}
 
 	// Create CRDs in karmada
-	caBase64 := base64.StdEncoding.EncodeToString(i.CertAndKeyFileData[fmt.Sprintf("%s.crt", options.CaCertAndKeyName)])
+	caBase64 := base64.StdEncoding.EncodeToString(i.CertAndKeyFileData[fmt.Sprintf("%s.crt", globaloptions.CaCertAndKeyName)])
 	if err := karmada.InitKarmadaResources(i.KarmadaDataPath, caBase64, i.Namespace); err != nil {
-		return err
-	}
-
-	// Create bootstrap token in karmada
-	registerCommand, err := karmada.InitKarmadaBootstrapToken(i.KarmadaDataPath)
-	if err != nil {
 		return err
 	}
 
@@ -505,7 +621,7 @@ func (i *CommandInitOption) RunInit(parentCommand string) error {
 		return err
 	}
 
-	utils.GenExamples(i.KarmadaDataPath, parentCommand, registerCommand)
+	utils.GenExamples(i.KarmadaDataPath, parentCommand)
 	return nil
 }
 
@@ -516,7 +632,7 @@ func (i *CommandInitOption) createKarmadaConfig() error {
 		return err
 	}
 	if err := utils.WriteKubeConfigFromSpec(serverURL, options.UserName, options.ClusterName, i.KarmadaDataPath, options.KarmadaKubeConfigName,
-		i.CertAndKeyFileData[fmt.Sprintf("%s.crt", options.CaCertAndKeyName)], i.CertAndKeyFileData[fmt.Sprintf("%s.key", options.KarmadaCertAndKeyName)],
+		i.CertAndKeyFileData[fmt.Sprintf("%s.crt", globaloptions.CaCertAndKeyName)], i.CertAndKeyFileData[fmt.Sprintf("%s.key", options.KarmadaCertAndKeyName)],
 		i.CertAndKeyFileData[fmt.Sprintf("%s.crt", options.KarmadaCertAndKeyName)]); err != nil {
 		return fmt.Errorf("failed to create karmada kubeconfig file. %v", err)
 	}
@@ -567,7 +683,7 @@ func (i *CommandInitOption) kubeControllerManagerImage() string {
 // get etcd-init image
 func (i *CommandInitOption) etcdInitImage() string {
 	if i.ImageRegistry != "" && i.EtcdInitImage == DefaultInitImage {
-		return i.ImageRegistry + "/alpine:3.15.1"
+		return i.ImageRegistry + "/alpine:3.21.0"
 	}
 	return i.EtcdInitImage
 }
@@ -598,7 +714,7 @@ func (i *CommandInitOption) karmadaControllerManagerImage() string {
 
 // get karmada-webhook image
 func (i *CommandInitOption) karmadaWebhookImage() string {
-	if i.ImageRegistry != "" && i.KarmadaWebhookImage == DefualtKarmadaWebhookImage {
+	if i.ImageRegistry != "" && i.KarmadaWebhookImage == DefaultKarmadaWebhookImage {
 		return i.ImageRegistry + "/karmada-webhook:" + karmadaRelease
 	}
 	return i.KarmadaWebhookImage
@@ -610,6 +726,33 @@ func (i *CommandInitOption) karmadaAggregatedAPIServerImage() string {
 		return i.ImageRegistry + "/karmada-aggregated-apiserver:" + karmadaRelease
 	}
 	return i.KarmadaAggregatedAPIServerImage
+}
+
+// get image pull secret
+func (i *CommandInitOption) getImagePullSecrets() []corev1.LocalObjectReference {
+	var imagePullSecrets []corev1.LocalObjectReference
+	for _, val := range i.PullSecrets {
+		secret := corev1.LocalObjectReference{
+			Name: val,
+		}
+		imagePullSecrets = append(imagePullSecrets, secret)
+	}
+	return imagePullSecrets
+}
+
+func (i *CommandInitOption) handleEtcdNodeSelectorLabels() error {
+	if i.EtcdStorageMode == etcdStorageModeHostPath && i.EtcdNodeSelectorLabels != "" {
+		selector, err := metav1.ParseToLabelSelector(i.EtcdNodeSelectorLabels)
+		if err != nil {
+			return fmt.Errorf("the etcdNodeSelector format is incorrect: %s", err)
+		}
+		labelMap, err := metav1.LabelSelectorAsMap(selector)
+		if err != nil {
+			return fmt.Errorf("failed to convert etcdNodeSelector labels to map: %v", err)
+		}
+		i.EtcdNodeSelectorLabelsMap = labelMap
+	}
+	return nil
 }
 
 func generateServerURL(serverIP string, nodePort int32) (string, error) {
@@ -626,4 +769,226 @@ func generateServerURL(serverIP string, nodePort int32) (string, error) {
 // SupportedStorageMode Return install etcd supported storage mode
 func SupportedStorageMode() []string {
 	return []string{etcdStorageModeEmptyDir, etcdStorageModeHostPath, etcdStorageModePVC}
+}
+
+// parseEtcdNodeSelectorLabelsMap parse etcd node selector labels
+func (i *CommandInitOption) parseEtcdNodeSelectorLabelsMap() error {
+	if i.EtcdNodeSelectorLabels == "" {
+		return nil
+	}
+	// Parse the label selector string into a LabelSelector object
+	selector, err := metav1.ParseToLabelSelector(i.EtcdNodeSelectorLabels)
+	if err != nil {
+		return fmt.Errorf("the etcdNodeSelector format is incorrect: %s", err)
+	}
+	// Convert the LabelSelector object into a map[string]string
+	labelMap, err := metav1.LabelSelectorAsMap(selector)
+	if err != nil {
+		return fmt.Errorf("failed to convert etcdNodeSelector labels to map: %v", err)
+	}
+	i.EtcdNodeSelectorLabelsMap = labelMap
+	return nil
+}
+
+// parseInitConfig parses fields from KarmadaInitConfig into CommandInitOption.
+// It is responsible for delegating the parsing of various configuration sections,
+// such as certificates, etcd, and control plane components.
+func (i *CommandInitOption) parseInitConfig(cfg *initConfig.KarmadaInitConfig) error {
+	spec := cfg.Spec
+
+	i.parseGeneralConfig(spec)
+	i.parseCertificateConfig(spec.Certificates)
+	i.parseEtcdConfig(spec.Etcd)
+	i.parseControlPlaneConfig(spec.Components)
+
+	setIfNotEmpty(&i.KarmadaDataPath, spec.KarmadaDataPath)
+	setIfNotEmpty(&i.KarmadaPkiPath, spec.KarmadaPKIPath)
+	setIfNotEmpty(&i.HostClusterDomain, spec.HostCluster.Domain)
+	setIfNotEmpty(&i.CRDs, spec.KarmadaCRDs)
+
+	return nil
+}
+
+// parseGeneralConfig parses basic configuration related to the host cluster,
+// such as namespace, kubeconfig, and image settings from the KarmadaInitConfigSpec.
+func (i *CommandInitOption) parseGeneralConfig(spec initConfig.KarmadaInitSpec) {
+	setIfNotEmpty(&i.KubeConfig, spec.HostCluster.Kubeconfig)
+	setIfNotEmpty(&i.KubeImageTag, spec.Images.KubeImageTag)
+	setIfNotEmpty(&i.KubeImageRegistry, spec.Images.KubeImageRegistry)
+	setIfNotEmpty(&i.KubeImageMirrorCountry, spec.Images.KubeImageMirrorCountry)
+
+	if spec.Images.PrivateRegistry != nil {
+		setIfNotEmpty(&i.ImageRegistry, spec.Images.PrivateRegistry.Registry)
+	}
+	setIfNotEmpty(&i.ImagePullPolicy, string(spec.Images.ImagePullPolicy))
+	setIfNotEmpty(&i.Context, spec.HostCluster.Context)
+
+	if len(spec.Images.ImagePullSecrets) != 0 {
+		i.PullSecrets = spec.Images.ImagePullSecrets
+	}
+	setIfNotZero(&i.WaitComponentReadyTimeout, spec.WaitComponentReadyTimeout)
+}
+
+// parseCertificateConfig parses certificate-related configuration, including CA files,
+// external DNS, and external IP from the Certificates configuration block.
+func (i *CommandInitOption) parseCertificateConfig(certificates initConfig.Certificates) {
+	setIfNotEmpty(&i.CaKeyFile, certificates.CAKeyFile)
+	setIfNotEmpty(&i.CaCertFile, certificates.CACertFile)
+
+	if len(certificates.ExternalDNS) > 0 {
+		i.ExternalDNS = joinStringSlice(certificates.ExternalDNS)
+	}
+
+	if len(certificates.ExternalIP) > 0 {
+		i.ExternalIP = joinStringSlice(certificates.ExternalIP)
+	}
+
+	if certificates.ValidityPeriod.Duration != 0 {
+		i.CertValidity = certificates.ValidityPeriod.Duration
+	}
+}
+
+// parseEtcdConfig handles the parsing of both local and external Etcd configurations.
+func (i *CommandInitOption) parseEtcdConfig(etcd initConfig.Etcd) {
+	if etcd.Local != nil {
+		i.parseLocalEtcdConfig(etcd.Local)
+	} else if etcd.External != nil {
+		i.parseExternalEtcdConfig(etcd.External)
+	}
+}
+
+// parseLocalEtcdConfig parses the local Etcd settings, including image information,
+// data path, PVC size, and node selector labels.
+func (i *CommandInitOption) parseLocalEtcdConfig(localEtcd *initConfig.LocalEtcd) {
+	setIfNotEmpty(&i.EtcdImage, localEtcd.CommonSettings.Image.GetImage())
+	setIfNotEmpty(&i.EtcdInitImage, localEtcd.InitImage.GetImage())
+	setIfNotEmpty(&i.EtcdHostDataPath, localEtcd.DataPath)
+	setIfNotEmpty(&i.EtcdPersistentVolumeSize, localEtcd.PVCSize)
+
+	if len(localEtcd.NodeSelectorLabels) != 0 {
+		i.EtcdNodeSelectorLabels = mapToString(localEtcd.NodeSelectorLabels)
+	}
+
+	setIfNotEmpty(&i.EtcdStorageMode, localEtcd.StorageMode)
+	setIfNotEmpty(&i.StorageClassesName, localEtcd.StorageClassesName)
+	setIfNotZeroInt32(&i.EtcdReplicas, localEtcd.Replicas)
+}
+
+// parseExternalEtcdConfig parses the external Etcd configuration, including CA file,
+// client certificates, and endpoints.
+func (i *CommandInitOption) parseExternalEtcdConfig(externalEtcd *initConfig.ExternalEtcd) {
+	setIfNotEmpty(&i.ExternalEtcdCACertPath, externalEtcd.CAFile)
+	setIfNotEmpty(&i.ExternalEtcdClientCertPath, externalEtcd.CertFile)
+	setIfNotEmpty(&i.ExternalEtcdClientKeyPath, externalEtcd.KeyFile)
+
+	if len(externalEtcd.Endpoints) > 0 {
+		i.ExternalEtcdServers = strings.Join(externalEtcd.Endpoints, ",")
+	}
+	setIfNotEmpty(&i.ExternalEtcdKeyPrefix, externalEtcd.KeyPrefix)
+}
+
+// parseControlPlaneConfig parses the configuration for various control plane components,
+// including API Server, Controller Manager, Scheduler, and Webhook.
+func (i *CommandInitOption) parseControlPlaneConfig(components initConfig.KarmadaComponents) {
+	i.parseKarmadaAPIServerConfig(components.KarmadaAPIServer)
+	i.parseKarmadaControllerManagerConfig(components.KarmadaControllerManager)
+	i.parseKarmadaSchedulerConfig(components.KarmadaScheduler)
+	i.parseKarmadaWebhookConfig(components.KarmadaWebhook)
+	i.parseKarmadaAggregatedAPIServerConfig(components.KarmadaAggregatedAPIServer)
+	i.parseKubeControllerManagerConfig(components.KubeControllerManager)
+}
+
+// parseKarmadaAPIServerConfig parses the configuration for the Karmada API Server component,
+// including image and replica settings, as well as advertise address.
+func (i *CommandInitOption) parseKarmadaAPIServerConfig(apiServer *initConfig.KarmadaAPIServer) {
+	if apiServer != nil {
+		setIfNotZeroInt32(&i.KarmadaAPIServerNodePort, apiServer.Networking.Port)
+		setIfNotEmpty(&i.Namespace, apiServer.Networking.Namespace)
+		setIfNotEmpty(&i.KarmadaAPIServerImage, apiServer.CommonSettings.Image.GetImage())
+		setIfNotZeroInt32(&i.KarmadaAPIServerReplicas, apiServer.CommonSettings.Replicas)
+		setIfNotEmpty(&i.KarmadaAPIServerAdvertiseAddress, apiServer.AdvertiseAddress)
+	}
+}
+
+// parseKarmadaControllerManagerConfig parses the configuration for the Karmada Controller Manager,
+// including image and replica settings.
+func (i *CommandInitOption) parseKarmadaControllerManagerConfig(manager *initConfig.KarmadaControllerManager) {
+	if manager != nil {
+		setIfNotEmpty(&i.KarmadaControllerManagerImage, manager.CommonSettings.Image.GetImage())
+		setIfNotZeroInt32(&i.KarmadaControllerManagerReplicas, manager.CommonSettings.Replicas)
+	}
+}
+
+// parseKarmadaSchedulerConfig parses the configuration for the Karmada Scheduler,
+// including image and replica settings.
+func (i *CommandInitOption) parseKarmadaSchedulerConfig(scheduler *initConfig.KarmadaScheduler) {
+	if scheduler != nil {
+		setIfNotEmpty(&i.KarmadaSchedulerImage, scheduler.CommonSettings.Image.GetImage())
+		setIfNotZeroInt32(&i.KarmadaSchedulerReplicas, scheduler.CommonSettings.Replicas)
+	}
+}
+
+// parseKarmadaWebhookConfig parses the configuration for the Karmada Webhook,
+// including image and replica settings.
+func (i *CommandInitOption) parseKarmadaWebhookConfig(webhook *initConfig.KarmadaWebhook) {
+	if webhook != nil {
+		setIfNotEmpty(&i.KarmadaWebhookImage, webhook.CommonSettings.Image.GetImage())
+		setIfNotZeroInt32(&i.KarmadaWebhookReplicas, webhook.CommonSettings.Replicas)
+	}
+}
+
+// parseKarmadaAggregatedAPIServerConfig parses the configuration for the Karmada Aggregated API Server,
+// including image and replica settings.
+func (i *CommandInitOption) parseKarmadaAggregatedAPIServerConfig(aggregatedAPIServer *initConfig.KarmadaAggregatedAPIServer) {
+	if aggregatedAPIServer != nil {
+		setIfNotEmpty(&i.KarmadaAggregatedAPIServerImage, aggregatedAPIServer.CommonSettings.Image.GetImage())
+		setIfNotZeroInt32(&i.KarmadaAggregatedAPIServerReplicas, aggregatedAPIServer.CommonSettings.Replicas)
+	}
+}
+
+// parseKubeControllerManagerConfig parses the configuration for the Kube Controller Manager,
+// including image and replica settings.
+func (i *CommandInitOption) parseKubeControllerManagerConfig(manager *initConfig.KubeControllerManager) {
+	if manager != nil {
+		setIfNotEmpty(&i.KubeControllerManagerImage, manager.CommonSettings.Image.GetImage())
+		setIfNotZeroInt32(&i.KubeControllerManagerReplicas, manager.CommonSettings.Replicas)
+	}
+}
+
+// mapToString converts a map to a comma-separated key=value string.
+func mapToString(m map[string]string) string {
+	var builder strings.Builder
+	for k, v := range m {
+		if builder.Len() > 0 {
+			builder.WriteString(",")
+		}
+		builder.WriteString(fmt.Sprintf("%s=%s", k, v))
+	}
+	return builder.String()
+}
+
+// setIfNotEmpty checks if the source string is not empty, and if so, assigns its value to the destination string.
+func setIfNotEmpty(dest *string, src string) {
+	if src != "" {
+		*dest = src
+	}
+}
+
+// setIfNotZero checks if the source integer is not zero, and if so, assigns its value to the destination integer.
+func setIfNotZero(dest *int, src int) {
+	if src != 0 {
+		*dest = src
+	}
+}
+
+// setIfNotZeroInt32 checks if the source int32 is not zero, and if so, assigns its value to the destination int32.
+func setIfNotZeroInt32(dest *int32, src int32) {
+	if src != 0 {
+		*dest = src
+	}
+}
+
+// joinStringSlice joins a slice of strings into a single string separated by commas.
+func joinStringSlice(slice []string) string {
+	return strings.Join(slice, ",")
 }

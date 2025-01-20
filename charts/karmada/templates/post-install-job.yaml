@@ -1,58 +1,7 @@
+{{- if semverCompare "<1.23.0-0" .Capabilities.KubeVersion.GitVersion }}
 {{- $name := include "karmada.name" . -}}
 {{- $namespace := include "karmada.namespace" . -}}
 {{- if eq .Values.installMode "host" }}
-{{- if eq .Values.certs.mode "custom" }}
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {{ $name }}-static-resources
-  namespace: {{ $namespace }}
-data:
-  {{- print "webhook-configuration.yaml: " | nindent 2 }} |-
-    {{- include "karmada.webhook.configuration" . | nindent 4 }}
-  {{- print "system-namespace.yaml: " | nindent 2 }} |-
-    {{- include "karmada.systemNamespace" . | nindent 4 }}
-  {{- print "karmada-aggregated-apiserver-apiservice.yaml: " | nindent 2 }} |-
-    {{- include "karmada.apiservice" . | nindent 4 }}
-  {{- print "cluster-proxy-admin-rbac.yaml: " | nindent 2 }} |-
-    {{- include "karmada.proxyRbac" . | nindent 4 }}
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {{ $name }}-crds
-  namespace: {{ $namespace }}
-data:
-  {{ range $path, $bytes := .Files.Glob (printf "_crds/**")}}
-  {{ $name := base $path }}
-  {{- (printf "%s: " $name) | nindent 2 }} |-
-    {{- $.Files.Get $path | nindent 4 }}
-  {{ end }}
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {{ $name }}-crds-bases
-  namespace: {{ $namespace }}
-data:
-  {{ range $path, $bytes := .Files.Glob (printf "_crds/bases/**")}}
-  {{ $name := base $path }}
-  {{- (printf "%s: " $name) | nindent 2 }} |-
-    {{- $.Files.Get $path | nindent 4 }}
-  {{ end }}
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {{ $name }}-crds-patches
-  namespace: {{ $namespace }}
-data:
-  {{- print "webhook_in_clusterresourcebindings.yaml: " | nindent 2 }} |-
-    {{- include "karmada.crd.patch.webhook.clusterresourcebinding" . | nindent 4 }}
-  {{- print "webhook_in_resourcebindings.yaml: " | nindent 2 }} |-
-    {{- include "karmada.crd.patch.webhook.resourcebinding" . | nindent 4 }}
----
-{{- end }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -63,12 +12,13 @@ metadata:
     app.kubernetes.io/instance: {{ $name | quote }}
     app.kubernetes.io/version: {{ .Chart.AppVersion }}
     helm.sh/chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+    {{- include "karmada.postInstallJob.labels" . | nindent 4 }}
   annotations:
     # This is what defines this resource as a hook. Without this line, the
     # job is considered part of the release.
     "helm.sh/hook": post-install
     "helm.sh/hook-weight": "0"
-    "helm.sh/hook-delete-policy": hook-succeeded
+    "helm.sh/hook-delete-policy": {{ .Values.postInstallJob.hookDeletePolicy }}
 spec:
   parallelism: 1
   completions: 1
@@ -80,6 +30,16 @@ spec:
         app.kubernetes.io/instance: {{ $name | quote }}
         helm.sh/chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
     spec:
+      {{- include "karmada.imagePullSecrets" . | nindent 6 }}
+      {{- with .Values.postInstallJob.tolerations}}
+      tolerations:
+      {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.postInstallJob.nodeSelector }}
+      nodeSelector:
+      {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ $name }}-hook-job
       restartPolicy: Never
       containers:
       - name: post-install
@@ -91,31 +51,15 @@ spec:
         - |
           bash <<'EOF'
           set -ex
-          kubectl apply -k /crds --kubeconfig /etc/kubeconfig
-          kubectl apply -f /static-resources --kubeconfig /etc/kubeconfig
+
+          # The `post-install hook job` may be applied before all karmada components are ready that rely on `static-resource job`.
+          # So, we have to postpone the deletion of the `static-resource job` until all karmada components are up and running.
+          while [[ $(kubectl get pods -n {{ $namespace }} --field-selector=status.phase!=Running,status.phase!=Succeeded -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | grep -v static-resource | wc -l) > 0 ]];
+          do
+            echo "waiting for all pods of karmada control plane ready..."; sleep 1;
+          done
+
+          kubectl delete job {{ $name }}-static-resource -n {{ $namespace }}
           EOF
-        volumeMounts:
-          - name: {{ $name }}-crds-bases
-            mountPath: /crds/bases
-          - name: {{ $name }}-crds-patches
-            mountPath: /crds/patches
-          - name: {{ $name }}-crds
-            mountPath: /crds
-          - name: {{ $name }}-static-resources
-            mountPath: /static-resources
-          {{ include "karmada.kubeconfig.volumeMount" . | nindent 10 }}
-      volumes:
-        - name: {{ $name }}-crds-bases
-          configMap:
-            name: {{ $name }}-crds-bases
-        - name: {{ $name }}-crds-patches
-          configMap:
-            name: {{ $name }}-crds-patches
-        - name: {{ $name }}-crds
-          configMap:
-            name: {{ $name }}-crds
-        - name: {{ $name }}-static-resources
-          configMap:
-            name: {{ $name }}-static-resources
-        {{ include "karmada.kubeconfig.volume" . | nindent 8 }}
+{{- end }}
 {{- end }}

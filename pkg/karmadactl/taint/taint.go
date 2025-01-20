@@ -1,3 +1,19 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package taint
 
 import (
@@ -21,6 +37,7 @@ import (
 	"github.com/karmada-io/karmada/pkg/generated/clientset/versioned/scheme"
 	"github.com/karmada-io/karmada/pkg/karmadactl/options"
 	"github.com/karmada-io/karmada/pkg/karmadactl/util"
+	utilcomp "github.com/karmada-io/karmada/pkg/karmadactl/util/completion"
 	"github.com/karmada-io/karmada/pkg/util/lifted"
 )
 
@@ -68,7 +85,8 @@ func NewCmdTaint(f util.Factory, parentCommand string) *cobra.Command {
 		Example:               fmt.Sprintf(taintExample, parentCommand),
 		SilenceUsage:          true,
 		DisableFlagsInUseLine: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		ValidArgsFunction:     utilcomp.SpecifiedResourceTypeAndNameCompletionFunc(f, []string{"cluster"}),
+		RunE: func(_ *cobra.Command, args []string) error {
 			if err := opts.Complete(f, args); err != nil {
 				return err
 			}
@@ -91,6 +109,7 @@ func NewCmdTaint(f util.Factory, parentCommand string) *cobra.Command {
 	flags.BoolVar(&opts.overwrite, "overwrite", opts.overwrite, "If true, allow taints to be overwritten, otherwise reject taint updates that overwrite existing taints.")
 	flags.BoolVar(&opts.DryRun, "dry-run", false, "Run the command in dry-run mode, without making any server requests.")
 
+	utilcomp.RegisterCompletionFuncForKarmadaContextFlag(cmd)
 	return cmd
 }
 
@@ -280,7 +299,7 @@ func reorganizeTaints(cluster *clusterv1alpha1.Cluster, overwrite bool, taintsTo
 
 // deleteTaints deletes the given taints from the cluster's taintlist.
 func deleteTaints(taintsToRemove []corev1.Taint, newTaints *[]corev1.Taint) ([]error, bool) {
-	allErrs := []error{}
+	var allErrs []error
 	var removed bool
 	for i, taintToRemove := range taintsToRemove {
 		if len(taintToRemove.Effect) > 0 {
@@ -327,7 +346,7 @@ func checkIfTaintsAlreadyExists(oldTaints []corev1.Taint, taints []corev1.Taint)
 
 // deleteTaintsByKey removes all the taints that have the same key to given taintKey
 func deleteTaintsByKey(taints []corev1.Taint, taintKey string) ([]corev1.Taint, bool) {
-	newTaints := []corev1.Taint{}
+	var newTaints []corev1.Taint
 	for i := range taints {
 		if taintKey == taints[i].Key {
 			continue
@@ -339,7 +358,7 @@ func deleteTaintsByKey(taints []corev1.Taint, taintKey string) ([]corev1.Taint, 
 
 // deleteTaint removes all the taints that have the same key and effect to given taintToDelete.
 func deleteTaint(taints []corev1.Taint, taintToDelete *corev1.Taint) ([]corev1.Taint, bool) {
-	newTaints := []corev1.Taint{}
+	var newTaints []corev1.Taint
 	for i := range taints {
 		if taintToDelete.MatchTaint(&taints[i]) {
 			continue

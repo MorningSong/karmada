@@ -1,3 +1,19 @@
+/*
+Copyright 2021 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package kubernetes
 
 import (
@@ -8,10 +24,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/pointer"
+	"k8s.io/component-base/cli/flag"
+	"k8s.io/utils/ptr"
 
 	"github.com/karmada-io/karmada/pkg/karmadactl/cmdinit/options"
-	"github.com/karmada-io/karmada/pkg/karmadactl/cmdinit/utils"
 )
 
 const (
@@ -35,11 +51,12 @@ const (
 
 var (
 	// appLabels remove via Labels karmada StatefulSet Deployment
-	appLabels  = map[string]string{"karmada.io/bootstrapping": "app-defaults"}
-	etcdLabels = map[string]string{"app": etcdStatefulSetAndServiceName}
+	appLabels        = map[string]string{"karmada.io/bootstrapping": "app-defaults"}
+	etcdLabels       = map[string]string{"app": etcdStatefulSetAndServiceName}
+	etcdCipherSuites = genEtcdCipherSuites()
 )
 
-func (i CommandInitOption) etcdVolume() (*[]corev1.Volume, *corev1.PersistentVolumeClaim) {
+func (i *CommandInitOption) etcdVolume() (*[]corev1.Volume, *corev1.PersistentVolumeClaim) {
 	var Volumes []corev1.Volume
 
 	secretVolume := corev1.Volume{
@@ -75,7 +92,7 @@ func (i CommandInitOption) etcdVolume() (*[]corev1.Volume, *corev1.PersistentVol
 				AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 				StorageClassName: &i.StorageClassesName,
 				VolumeMode:       &mode,
-				Resources: corev1.ResourceRequirements{
+				Resources: corev1.VolumeResourceRequirements{
 					Requests: corev1.ResourceList{
 						corev1.ResourceStorage: resource.MustParse(i.EtcdPersistentVolumeSize),
 					},
@@ -113,7 +130,7 @@ func (i CommandInitOption) etcdVolume() (*[]corev1.Volume, *corev1.PersistentVol
 func (i *CommandInitOption) etcdInitContainerCommand() []string {
 	etcdClusterConfig := ""
 	for v := int32(0); v < i.EtcdReplicas; v++ {
-		etcdClusterConfig += fmt.Sprintf("%s-%v=http://%s-%v.%s.%s.svc.cluster.local:%v", etcdStatefulSetAndServiceName, v, etcdStatefulSetAndServiceName, v, etcdStatefulSetAndServiceName, i.Namespace, etcdContainerServerPort) + ","
+		etcdClusterConfig += fmt.Sprintf("%s-%v=http://%s-%v.%s.%s.svc.%s:%v", etcdStatefulSetAndServiceName, v, etcdStatefulSetAndServiceName, v, etcdStatefulSetAndServiceName, i.Namespace, i.HostClusterDomain, etcdContainerServerPort) + ","
 	}
 
 	command := []string{
@@ -139,8 +156,9 @@ initial-cluster: %s
 listen-peer-urls: http://${%s}:%v
 listen-client-urls: https://${%s}:%v,http://127.0.0.1:%v
 initial-advertise-peer-urls: http://${%s}:%v
-advertise-client-urls: https://${%s}.%s.%s.svc.cluster.local:%v
+advertise-client-urls: https://${%s}.%s.%s.svc.%s:%v
 data-dir: %s
+cipher-suites: %s
 
 `,
 			etcdContainerConfigDataMountPath, etcdConfigName,
@@ -155,8 +173,11 @@ data-dir: %s
 			etcdEnvPodIP, etcdContainerServerPort,
 			etcdEnvPodIP, etcdContainerClientPort, etcdContainerClientPort,
 			etcdEnvPodIP, etcdContainerServerPort,
-			etcdEnvPodName, etcdStatefulSetAndServiceName, i.Namespace, etcdContainerClientPort,
+			etcdEnvPodName, etcdStatefulSetAndServiceName,
+			i.Namespace, i.HostClusterDomain,
+			etcdContainerClientPort,
 			etcdContainerDataVolumeMountPath,
+			etcdCipherSuites,
 		),
 	}
 
@@ -211,6 +232,7 @@ func (i *CommandInitOption) makeETCDStatefulSet() *appsv1.StatefulSet {
 
 	// etcd Container
 	podSpec := corev1.PodSpec{
+		ImagePullSecrets: i.getImagePullSecrets(),
 		Affinity: &corev1.Affinity{
 			PodAntiAffinity: &corev1.PodAntiAffinity{
 				PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{
@@ -232,7 +254,7 @@ func (i *CommandInitOption) makeETCDStatefulSet() *appsv1.StatefulSet {
 				},
 			},
 		},
-		AutomountServiceAccountToken: pointer.Bool(false),
+		AutomountServiceAccountToken: ptr.To[bool](false),
 		Containers: []corev1.Container{
 			{
 				Name:  etcdStatefulSetAndServiceName,
@@ -277,11 +299,12 @@ func (i *CommandInitOption) makeETCDStatefulSet() *appsv1.StatefulSet {
 		Volumes: *Volumes,
 	}
 
-	if i.EtcdStorageMode == "hostPath" && i.EtcdNodeSelectorLabels != "" {
-		podSpec.NodeSelector = utils.StringToMap(i.EtcdNodeSelectorLabels)
-	}
-	if i.EtcdStorageMode == "hostPath" && i.EtcdNodeSelectorLabels == "" {
-		podSpec.NodeSelector = map[string]string{"karmada.io/etcd": ""}
+	if i.EtcdStorageMode == "hostPath" {
+		if i.EtcdNodeSelectorLabelsMap != nil {
+			podSpec.NodeSelector = i.EtcdNodeSelectorLabelsMap
+		} else {
+			podSpec.NodeSelector = map[string]string{"karmada.io/etcd": ""}
+		}
 	}
 
 	// InitContainers
@@ -346,4 +369,13 @@ func (i *CommandInitOption) makeETCDStatefulSet() *appsv1.StatefulSet {
 	}
 
 	return etcd
+}
+
+// Setting Golang's secure cipher suites as etcd's cipher suites.
+// They are obtained by the return value of the function CipherSuites() under the go/src/crypto/tls/cipher_suites.go package.
+// Consistent with the Preferred values of k8s’s default cipher suites.
+func genEtcdCipherSuites() string {
+	cipherSuites := strings.Join(flag.PreferredTLSCipherNames(), "\",\"")
+	cipherSuites = "[\"" + cipherSuites + "\"]"
+	return cipherSuites
 }

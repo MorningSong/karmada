@@ -1,9 +1,24 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package deinit
 
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -38,8 +53,9 @@ type CommandDeInitOption struct {
 	Namespace  string
 
 	// DryRun tells if run the command in dry-run mode, without making any server requests.
-	DryRun bool
-	Force  bool
+	DryRun         bool
+	Force          bool
+	PurgeNamespace bool
 
 	KubeClientSet *kubernetes.Clientset
 }
@@ -54,7 +70,7 @@ func NewCmdDeInit(parentCommand string) *cobra.Command {
 		Example:               fmt.Sprintf(deInitExample, parentCommand),
 		SilenceUsage:          true,
 		DisableFlagsInUseLine: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			if err := opts.Complete(); err != nil {
 				return err
 			}
@@ -82,6 +98,7 @@ func NewCmdDeInit(parentCommand string) *cobra.Command {
 	flags.StringVar(&opts.Context, "context", "", "The name of the kubeconfig context to use")
 	flags.BoolVar(&opts.DryRun, "dry-run", false, "Run the command in dry-run mode, without making any server requests.")
 	flags.BoolVarP(&opts.Force, "force", "f", false, "Reset cluster without prompting for confirmation.")
+	flags.BoolVar(&opts.PurgeNamespace, "purge-namespace", false, "Run the command with purge-namespace, the namespace which Karmada components were installed will be deleted.")
 	return cmd
 }
 
@@ -144,14 +161,15 @@ func (o *CommandDeInitOption) delete() error {
 	}
 
 	// Delete namespace where Karmada components are installed
-	fmt.Printf("delete Namespace %q\n", o.Namespace)
-	if o.DryRun {
-		return nil
+	if o.PurgeNamespace {
+		fmt.Printf("delete Namespace %q\n", o.Namespace)
+		if o.DryRun {
+			return nil
+		}
+		if err = o.KubeClientSet.CoreV1().Namespaces().Delete(context.Background(), o.Namespace, metav1.DeleteOptions{}); err != nil {
+			return err
+		}
 	}
-	if err = o.KubeClientSet.CoreV1().Namespaces().Delete(context.Background(), o.Namespace, metav1.DeleteOptions{}); err != nil {
-		return err
-	}
-
 	return nil
 }
 
@@ -224,31 +242,11 @@ func removeLabels(node *corev1.Node, removesLabel string) {
 	}
 }
 
-// deleteConfirmation delete karmada confirmation
-func deleteConfirmation() bool {
-	fmt.Print("Please type (y)es or (n)o and then press enter:")
-	var response string
-	_, err := fmt.Scanln(&response)
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
-
-	switch strings.ToLower(response) {
-	case "y", "yes":
-		return true
-	case "n", "no":
-		return false
-	default:
-		return deleteConfirmation()
-	}
-}
-
 // Run start delete
 func (o *CommandDeInitOption) Run() error {
 	fmt.Println("removes Karmada from Kubernetes")
 	// delete confirmation,exit the delete action when false.
-	if !o.Force && !deleteConfirmation() {
+	if !o.Force && !util.DeleteConfirmation() {
 		return nil
 	}
 

@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Karmada Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package interpreter
 
 import (
@@ -8,7 +24,7 @@ import (
 
 	configv1alpha1 "github.com/karmada-io/karmada/pkg/apis/config/v1alpha1"
 	workv1alpha2 "github.com/karmada-io/karmada/pkg/apis/work/v1alpha2"
-	"github.com/karmada-io/karmada/pkg/resourceinterpreter/configurableinterpreter"
+	"github.com/karmada-io/karmada/pkg/resourceinterpreter/customized/declarative"
 )
 
 // AllResourceInterpreterCustomizationRules all InterpreterOperations
@@ -56,7 +72,7 @@ func (r *retentionRule) SetScript(c *configv1alpha1.ResourceInterpreterCustomiza
 	c.Spec.Customizations.Retention.LuaScript = script
 }
 
-func (r *retentionRule) Run(interpreter *configurableinterpreter.ConfigurableInterpreter, args RuleArgs) *RuleResult {
+func (r *retentionRule) Run(interpreter *declarative.ConfigurableInterpreter, args RuleArgs) *RuleResult {
 	desired, err := args.getDesiredObjectOrError()
 	if err != nil {
 		return newRuleResultWithError(err)
@@ -114,7 +130,7 @@ func (r *replicaResourceRule) SetScript(c *configv1alpha1.ResourceInterpreterCus
 	c.Spec.Customizations.ReplicaResource.LuaScript = script
 }
 
-func (r *replicaResourceRule) Run(interpreter *configurableinterpreter.ConfigurableInterpreter, args RuleArgs) *RuleResult {
+func (r *replicaResourceRule) Run(interpreter *declarative.ConfigurableInterpreter, args RuleArgs) *RuleResult {
 	obj, err := args.getObjectOrError()
 	if err != nil {
 		return newRuleResultWithError(err)
@@ -164,7 +180,7 @@ func (r *replicaRevisionRule) SetScript(c *configv1alpha1.ResourceInterpreterCus
 	c.Spec.Customizations.ReplicaRevision.LuaScript = script
 }
 
-func (r *replicaRevisionRule) Run(interpreter *configurableinterpreter.ConfigurableInterpreter, args RuleArgs) *RuleResult {
+func (r *replicaRevisionRule) Run(interpreter *declarative.ConfigurableInterpreter, args RuleArgs) *RuleResult {
 	obj, err := args.getObjectOrError()
 	if err != nil {
 		return newRuleResultWithError(err)
@@ -215,7 +231,7 @@ func (s *statusReflectionRule) SetScript(c *configv1alpha1.ResourceInterpreterCu
 	c.Spec.Customizations.StatusReflection.LuaScript = script
 }
 
-func (s *statusReflectionRule) Run(interpreter *configurableinterpreter.ConfigurableInterpreter, args RuleArgs) *RuleResult {
+func (s *statusReflectionRule) Run(interpreter *declarative.ConfigurableInterpreter, args RuleArgs) *RuleResult {
 	obj, err := args.getObjectOrError()
 	if err != nil {
 		return newRuleResultWithError(err)
@@ -267,7 +283,7 @@ func (s *statusAggregationRule) SetScript(c *configv1alpha1.ResourceInterpreterC
 	c.Spec.Customizations.StatusAggregation.LuaScript = script
 }
 
-func (s *statusAggregationRule) Run(interpreter *configurableinterpreter.ConfigurableInterpreter, args RuleArgs) *RuleResult {
+func (s *statusAggregationRule) Run(interpreter *declarative.ConfigurableInterpreter, args RuleArgs) *RuleResult {
 	obj, err := args.getObjectOrError()
 	if err != nil {
 		return newRuleResultWithError(err)
@@ -324,7 +340,7 @@ func (h *healthInterpretationRule) SetScript(c *configv1alpha1.ResourceInterpret
 	c.Spec.Customizations.HealthInterpretation.LuaScript = script
 }
 
-func (h *healthInterpretationRule) Run(interpreter *configurableinterpreter.ConfigurableInterpreter, args RuleArgs) *RuleResult {
+func (h *healthInterpretationRule) Run(interpreter *declarative.ConfigurableInterpreter, args RuleArgs) *RuleResult {
 	obj, err := args.getObjectOrError()
 	if err != nil {
 		return newRuleResultWithError(err)
@@ -351,14 +367,14 @@ func (d *dependencyInterpretationRule) Document() string {
 The script should implement a function as follows:
 function GetDependencies(desiredObj)
   dependencies = {}
-  if desiredObj.spec.serviceAccountName ~= "" and desiredObj.spec.serviceAccountName ~= "default" then
+  serviceAccountName = desiredObj.spec.template.spec.serviceAccountName
+  if serviceAccountName ~= nil and serviceAccountName ~= "default" then
     dependency = {}
     dependency.apiVersion = "v1"
     dependency.kind = "ServiceAccount"
-    dependency.name = desiredObj.spec.serviceAccountName
-    dependency.namespace = desiredObj.namespace
-    dependencies[0] = {}
-    dependencies[0] = dependency
+    dependency.name = serviceAccountName
+    dependency.namespace = desiredObj.metadata.namespace
+    dependencies[1] = dependency
   end
   return dependencies
 end`
@@ -383,7 +399,7 @@ func (d *dependencyInterpretationRule) SetScript(c *configv1alpha1.ResourceInter
 	c.Spec.Customizations.DependencyInterpretation.LuaScript = script
 }
 
-func (d *dependencyInterpretationRule) Run(interpreter *configurableinterpreter.ConfigurableInterpreter, args RuleArgs) *RuleResult {
+func (d *dependencyInterpretationRule) Run(interpreter *declarative.ConfigurableInterpreter, args RuleArgs) *RuleResult {
 	obj, err := args.getObjectOrError()
 	if err != nil {
 		return newRuleResultWithError(err)
@@ -409,7 +425,7 @@ type Rule interface {
 	// SetScript set the script for the rule. If script is empty, disable the rule.
 	SetScript(*configv1alpha1.ResourceInterpreterCustomization, string)
 	// Run execute the rule with given args, and return the result.
-	Run(*configurableinterpreter.ConfigurableInterpreter, RuleArgs) *RuleResult
+	Run(*declarative.ConfigurableInterpreter, RuleArgs) *RuleResult
 }
 
 // Rules is a series of rules.
