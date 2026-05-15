@@ -2,9 +2,9 @@
 <!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
 **Table of Contents**  *generated with [DocToc](https://github.com/thlorenz/doctoc)*
 
-- [v1.18.0-beta.0](#v1180-beta0)
-  - [Downloads for v1.18.0-beta.0](#downloads-for-v1180-beta0)
-  - [Changelog since v1.18.0-alpha.2](#changelog-since-v1180-alpha2)
+- [v1.18.0-rc.0](#v1180-rc0)
+  - [Downloads for v1.18.0-rc.0](#downloads-for-v1180-rc0)
+  - [Changelog since v1.18.0-beta.0](#changelog-since-v1180-beta0)
   - [Urgent Update Notes](#urgent-update-notes)
   - [Changes by Kind](#changes-by-kind)
     - [API Changes](#api-changes)
@@ -17,9 +17,9 @@
     - [Helm Charts](#helm-charts)
     - [Instrumentation](#instrumentation)
     - [Performance](#performance)
-- [v1.18.0-alpha.2](#v1180-alpha2)
-  - [Downloads for v1.18.0-alpha.2](#downloads-for-v1180-alpha2)
-  - [Changelog since v1.18.0-alpha.1](#changelog-since-v1180-alpha1)
+- [v1.18.0-beta.0](#v1180-beta0)
+  - [Downloads for v1.18.0-beta.0](#downloads-for-v1180-beta0)
+  - [Changelog since v1.18.0-alpha.2](#changelog-since-v1180-alpha2)
   - [Urgent Update Notes](#urgent-update-notes-1)
   - [Changes by Kind](#changes-by-kind-1)
     - [API Changes](#api-changes-1)
@@ -32,9 +32,9 @@
     - [Helm Charts](#helm-charts-1)
     - [Instrumentation](#instrumentation-1)
     - [Performance](#performance-1)
-- [v1.18.0-alpha.1](#v1180-alpha1)
-  - [Downloads for v1.18.0-alpha.1](#downloads-for-v1180-alpha1)
-  - [Changelog since v1.18.0-alpha.0](#changelog-since-v1180-alpha0)
+- [v1.18.0-alpha.2](#v1180-alpha2)
+  - [Downloads for v1.18.0-alpha.2](#downloads-for-v1180-alpha2)
+  - [Changelog since v1.18.0-alpha.1](#changelog-since-v1180-alpha1)
   - [Urgent Update Notes](#urgent-update-notes-2)
   - [Changes by Kind](#changes-by-kind-2)
     - [API Changes](#api-changes-2)
@@ -47,8 +47,66 @@
     - [Helm Charts](#helm-charts-2)
     - [Instrumentation](#instrumentation-2)
     - [Performance](#performance-2)
+- [v1.18.0-alpha.1](#v1180-alpha1)
+  - [Downloads for v1.18.0-alpha.1](#downloads-for-v1180-alpha1)
+  - [Changelog since v1.18.0-alpha.0](#changelog-since-v1180-alpha0)
+  - [Urgent Update Notes](#urgent-update-notes-3)
+  - [Changes by Kind](#changes-by-kind-3)
+    - [API Changes](#api-changes-3)
+    - [Features & Enhancements](#features--enhancements-3)
+    - [Deprecation](#deprecation-3)
+    - [Bug Fixes](#bug-fixes-3)
+    - [Security](#security-3)
+  - [Other](#other-3)
+    - [Dependencies](#dependencies-3)
+    - [Helm Charts](#helm-charts-3)
+    - [Instrumentation](#instrumentation-3)
+    - [Performance](#performance-3)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
+
+# v1.18.0-rc.0
+## Downloads for v1.18.0-rc.0
+
+Download v1.18.0-rc.0 in the [v1.18.0-rc.0 release page](https://github.com/karmada-io/karmada/releases/tag/v1.18.0-rc.0).
+
+## Changelog since v1.18.0-beta.0
+
+## Urgent Update Notes
+- `karmada-operator-chart`: To ensure a smooth upgrade, users must first upgrade to release `v1.17.3+` before upgrading to a `v1.18.x` release. ([#7457](https://github.com/karmada-io/karmada/pull/7457), @jabellard)
+
+## Changes by Kind
+
+### API Changes
+- `karmada-scheduler-estimator`: Introduced `AssumedWorkloads` field into the gRPC message `MaxAvailableComponentSetsRequest`. ([#7491](https://github.com/karmada-io/karmada/pull/7491), @XiShanYongYe-Chang)
+
+### Features & Enhancements
+- `karmada-controller-manager`: Avoided unnecessary reconciles by skipping no-op updates in ResourceDetector policy handlers. ([#7417](https://github.com/karmada-io/karmada/pull/7417), @LivingCcj)
+
+### Deprecation
+None.
+
+### Bug Fixes
+- `etcd`: Changed health probes to use the `/livez` and `/readyz` endpoints, since the previous shell-based probes no longer worked in the 3.6.6-0 etcd container image. ([#7381](https://github.com/karmada-io/karmada/pull/7381), @vgt-rangehrn)
+- `karmada-controller-manager`: Fixed the flink-deployment health interpreter to only treat `ErrImagePull` and `ImagePullBackOff` as healthy during ephemeral state. ([#7476](https://github.com/karmada-io/karmada/pull/7476), @dahuo98)
+- `karmada-operator-chart`: Fixed the issue where embedding the `Karmada` CRD exceeded the ConfigMap size limit in the chart's installation/upgrade job, which prevented users from upgrading the chart. ([#7457](https://github.com/karmada-io/karmada/pull/7457), @jabellard)
+
+### Security
+None.
+
+## Other
+
+### Dependencies
+None.
+
+### Helm Charts
+- `Helm chart`: Added helm index for `v1.17.2`. ([#7456](https://github.com/karmada-io/karmada/pull/7456), @github-actions)
+
+### Instrumentation
+None.
+
+### Performance
+None.
 
 # v1.18.0-beta.0
 ## Downloads for v1.18.0-beta.0
